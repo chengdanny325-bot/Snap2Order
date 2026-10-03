@@ -32,6 +32,9 @@ async function session(requiredRole) {
 }
 function header(kind='public', name='') {
   let nav='';
+  document.body.classList.toggle('merchant-shell',kind==='merchant');
+  document.querySelector('.merchant-sidebar')?.remove();
+  if(kind==='merchant'){const side=document.createElement('aside');side.className='merchant-sidebar';const links=[['brand','品牌与店铺资料'],['import','菜单与商品'],['modules','功能模块'],['preview','预览与发布']];side.innerHTML='<div class=eyebrow>门店管理</div><nav aria-label=商家功能分区>'+links.map(([id,name],n)=>`<a href="/merchant/menu#${id}" ${location.pathname==='/merchant/menu'&&(location.hash.slice(1)||'brand')===id?'aria-current=page':''}><small>0${n+1}</small>${name}</a>`).join('')+`<a href="/merchant/orders" ${location.pathname==='/merchant/orders'?'aria-current=page':''}><small>05</small>订单工作台</a></nav><p class=hint>草稿保存后可继续编辑。<br>发布后顾客看到整店新版本。</p>`;document.body.insertBefore(side,$('#app'));}
   if(kind==='merchant') nav=`<a href="/merchant/menu" ${location.pathname==='/merchant/menu'?'aria-current="page"':''}>我的菜单</a><a href="/merchant/orders" ${location.pathname==='/merchant/orders'?'aria-current="page"':''}>接单工作台</a>`;
   if(kind==='customer') nav='<a href="/shops">选择小店</a><a href="/customer/orders">本设备订单</a>';
   const home=kind==='merchant'?'/merchant/menu':'/';
@@ -39,7 +42,7 @@ function header(kind='public', name='') {
   const logout=$('#logout'); if(logout)logout.onclick=async()=>{try{await api('auth/logout',{});for(const key of Object.keys(sessionStorage)){if(key.startsWith('snap_cart_')||key==='snap_pending_cart')sessionStorage.removeItem(key);}me=null;csrf='';location.href=kind==='merchant'?'/login?role=merchant':location.pathname.startsWith('/s/')?location.pathname:'/';}catch(e){fail(e);}};
 }
 function heading(tag,title,description) {return `<div class="eyebrow">${tag}</div><h1>${title}</h1><p class="lead">${description}</p>`;}
-const statusName=s=>({pending:'待确认',preparing:'制作中',completed:'已完成 / 待取餐'}[s]||s);
+const statusName=s=>({cancelled:'已取消',rejected:'商家拒单',expired:'超时关闭',pending:'待确认',preparing:'制作中',completed:'已完成 / 待取餐'}[s]||s);
 function lines(o) {return o.items.map(i=>`<div class="row cart-row"><span>${esc(i.name)} × ${i.qty}</span><b>${money(i.price*i.qty)}</b></div>`).join('');}
 function displayTime(t) {return new Date(t).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 async function action(button, fn) {
@@ -58,6 +61,12 @@ const BRAND_THEMES=[
   {id:'cute',name:'可爱粉嫩',desc:'圆润字体与波点，活泼亲切',swatches:['#e5568f','#fff7fb','#ffeef5']},
   {id:'luxury',name:'奢华黑金',desc:'深色底配金色，高端质感',swatches:['#c9a15a','#1e1a15','#131110']},
 ];
+BRAND_THEMES.unshift(
+  {id:'universal',name:'简约通用',desc:'大方留白，适合各类门店',swatches:['#293e38','#fffefa','#f4f3ee']},
+  {id:'western',name:'高端西餐',desc:'深色金边，优雅餐厅气质',swatches:['#c9a15a','#1e1a15','#131110']},
+  {id:'hotpot',name:'中式火锅',desc:'暖红米白，热闹清晰的菜单',swatches:['#a73324','#fff9ee','#f9eadb']}
+);
+for(const theme of BRAND_THEMES)theme.types={universal:['通用'],western:['西餐咖啡'],hotpot:['中式餐饮'],minimal:['通用','西餐咖啡'],classic:['中式餐饮'],luxury:['西餐咖啡'],cute:['茶饮甜品'],vibrant:['中式餐饮','茶饮甜品'],fresh:['通用','茶饮甜品']}[theme.id];
 const themeName=id=>(BRAND_THEMES.find(t=>t.id===id)||BRAND_THEMES[0]).name;
 function applyBrand(brand){
   const theme=BRAND_THEMES.find(t=>t.id===((brand&&brand.theme)||'fresh'))||BRAND_THEMES[0];

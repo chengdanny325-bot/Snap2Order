@@ -1,4 +1,6 @@
 """Snap2Order: authenticated multi-store demo, standard-library runtime."""
+import base64
+import store_config
 import hashlib
 import hmac
 import json
@@ -73,7 +75,7 @@ def init_db():
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version > 4:
+        if version > 5:
             raise RuntimeError('数据库版本较新，请使用对应版本的服务')
         db.executescript((ROOT / 'schema.sql').read_text())
         columns = {r['name'] for r in db.execute('PRAGMA table_info(menu_items)')}
@@ -85,6 +87,16 @@ def init_db():
                             ('brand_draft_json', "ALTER TABLE stores ADD COLUMN brand_draft_json TEXT NOT NULL DEFAULT '{}'")]:
             if column not in store_columns:
                 db.execute(ddl)
+        additions = {
+            'stores': [('config_json', "TEXT NOT NULL DEFAULT '{}'"), ('config_draft_json', "TEXT NOT NULL DEFAULT '{}'" )],
+            'menu_items': [('details_json', "TEXT NOT NULL DEFAULT '{}'"), ('stock', 'INTEGER')],
+            'orders': [('resolution', 'TEXT'), ('reason', "TEXT NOT NULL DEFAULT ''"), ('discount_cents', 'INTEGER NOT NULL DEFAULT 0'), ('coupon_id', 'TEXT'), ('points_awarded', 'INTEGER NOT NULL DEFAULT 0')],
+        }
+        for table, columns_to_add in additions.items():
+            existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
+            for column, definition in columns_to_add:
+                if column not in existing: db.execute('ALTER TABLE '+table+' ADD COLUMN '+column+' '+definition)
+        db.execute('PRAGMA user_version=5')
         db.execute('UPDATE stores SET draft_name=name WHERE draft_name IS NULL')
         # Interrupted OCR jobs can be retried; never show an endless processing state.
         db.execute("UPDATE ocr_sources SET status='failed', error='识别被服务重启中断，请重试。' WHERE status='processing'")
@@ -162,15 +174,19 @@ def normalized_items(raw, publish=False):
         image_url = item.get('image_url') or None
         if image_url is not None and (not isinstance(image_url,str) or not (image_url in dish_media.STOCK_URLS or re.fullmatch(r'/api/dish-images/[a-f0-9]{32}',image_url))):
             raise APIError('菜品图片地址无效，请重新上传或从素材库选择')
-        result.append({'image_url': image_url, 'id': identifier, 'name': name, 'price': amount, 'category': category,
-                       'available': item.get('available', True) is True, 'checked': checked,
+        try:
+            details = store_config.item_details(item)
+        except ValueError as e:
+            raise APIError(str(e))
+        result.append({**details, 'image_url': image_url, 'id': identifier, 'name': name, 'price': amount, 'category': category,
+                       'stock_update': item.get('stock_update') is True, 'available': item.get('available', True) is True, 'checked': checked,
                        'confidence': confidence})
     if publish and not any(i['available'] for i in result):
         raise APIError('请至少上架一道菜后再发布')
     return result
 
 
-BRAND_THEMES = ('fresh', 'minimal', 'vibrant', 'classic', 'cute', 'luxury')
+BRAND_THEMES = store_config.THEMES
 
 
 def parse_brand(raw):
@@ -213,12 +229,12 @@ def get_store(db, user_id):
 def serialize_store(db, store, merchant=False):
     rows = db.execute('SELECT * FROM menu_items WHERE store_id=? AND active=1 ORDER BY position', (store['id'],)).fetchall()
     items = [{'id': i['id'], 'name': i['name'], 'price': i['price_cents']/100, 'category': i['category'],
-              'image_url': i['image_url'], 'available': bool(i['available']), 'checked': True, 'confidence': i['confidence']} for i in rows if merchant or i['available']]
+              **json.loads(i['details_json']), 'stock': i['stock'], 'image_url': i['image_url'], 'available': bool(i['available']), 'checked': True, 'confidence': i['confidence']} for i in rows if merchant or i['available']]
     result = {'id': store['id'], 'name': store['name'], 'published': bool(store['published']),
-              'brand': parse_brand(store['brand_json']), 'items': items}
+              'brand': parse_brand(store['brand_json']), 'config': store_config.normalize(json.loads(store['config_json'])), 'items': items}
     if merchant:
         result.update(draft=json.loads(store['draft_json']), source_id=store['draft_source_id'],
-                      draft_name=store['draft_name'] or store['name'], brand_draft=parse_brand(store['brand_draft_json']))
+                      config_draft=store_config.normalize(json.loads(store['config_draft_json'])), draft_name=store['draft_name'] or store['name'], brand_draft=parse_brand(store['brand_draft_json']))
     return result
 
 
@@ -226,9 +242,28 @@ def serialize_order(db, order):
     rows = db.execute('SELECT * FROM order_items WHERE order_id=? ORDER BY id', (order['id'],)).fetchall()
     store = db.execute('SELECT name FROM stores WHERE id=?', (order['store_id'],)).fetchone()
     return {'id': order['id'], 'store_id': order['store_id'], 'store_name': store['name'],
-            'total': order['total_cents']/100, 'note': order['note'], 'status': order['status'],
+            'total': order['total_cents']/100, 'note': order['note'], 'status': order['resolution'] or order['status'], 'reason': order['reason'], 'discount': order['discount_cents']/100,
             'payment': order['payment_status'], 'created': order['created_at'],
             'items': [{'name': i['name_snapshot'], 'price': i['price_cents_snapshot']/100, 'qty': i['quantity']} for i in rows]}
+
+
+def release_order(db, order, resolution, reason):
+    # Transactional and idempotent: a terminal resolution can release inventory only once.
+    if order['resolution'] or order['status'] == 'completed':
+        raise APIError('订单已结束，请刷新',409)
+    for row in db.execute('SELECT menu_item_id,quantity FROM order_items WHERE order_id=?',(order['id'],)):
+        db.execute('UPDATE menu_items SET stock=stock+? WHERE id=? AND stock IS NOT NULL',(row['quantity'],row['menu_item_id']))
+    if order['points_awarded']:
+        db.execute('UPDATE members SET points=MAX(0,points-?) WHERE store_id=? AND customer_id=?',(order['points_awarded'],order['store_id'],order['customer_id']))
+    if order['coupon_id']:
+        db.execute('UPDATE coupons SET used_order=NULL WHERE id=? AND used_order=?',(order['coupon_id'],order['id']))
+    db.execute('UPDATE orders SET resolution=?,reason=?,updated_at=? WHERE id=?',(resolution,reason,now(),order['id']))
+
+def expire_orders(db):
+    cutoff = datetime.fromtimestamp(time.time()-1800, timezone.utc).isoformat()
+    for order in db.execute("SELECT * FROM orders WHERE status='pending' AND resolution IS NULL AND payment_status='unpaid' AND created_at<?",(cutoff,)).fetchall():
+        release_order(db,order,'expired','30 分钟未完成支付，订单已关闭')
+
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -252,8 +287,8 @@ class Handler(BaseHTTPRequestHandler):
     def common_headers(self):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'same-origin')
-        self.send_header('X-Frame-Options', 'DENY')
-        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
+        self.send_header('X-Frame-Options', 'SAMEORIGIN' if urlsplit(self.path).path=='/merchant/preview' else 'DENY')
+        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors "+("'self'" if urlsplit(self.path).path=='/merchant/preview' else "'none'")+"; form-action 'self'; base-uri 'self'")
 
     def body(self, image=False):
         try:
@@ -335,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith('/api/'):
                 return self.get_api(path)
             routes = {'/': 'index.html', '/login': 'login.html', '/merchant/menu': 'merchant-menu.html',
-                      '/merchant/orders': 'merchant-orders.html', '/customer/orders': 'customer-orders.html', '/shops': 'shops.html'}
+                      '/merchant/preview': 'customer.html', '/merchant/orders': 'merchant-orders.html', '/customer/orders': 'customer-orders.html', '/shops': 'shops.html'}
             if re.fullmatch(r'/s/[a-f0-9]{24}', path):
                 filename = 'customer.html'
             elif path in routes:
@@ -364,6 +399,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_api(self, path):
         with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            expire_orders(db)
+            db.commit()
+            if path == '/api/merchant/preview':
+                user = self.session(db,'merchant')
+                store = get_store(db,user['user_id'])
+                result = serialize_store(db,store,True)
+                result.update(name=result['draft_name'],brand=result['brand_draft'],config=result['config_draft'],items=[i for i in result['draft'] if i.get('available',True)])
+                return self.send({'store':result})
+            marketing = re.fullmatch(r'/api/stores/([a-f0-9]{24})/benefits',path)
+            if marketing:
+                user = self.session(db,'customer')
+                store = db.execute('SELECT * FROM stores WHERE id=? AND published=1',(marketing[1],)).fetchone()
+                if not store: raise APIError('店铺不存在',404)
+                member = db.execute('SELECT * FROM members WHERE store_id=? AND customer_id=?',(store['id'],user['user_id'])).fetchone()
+                coupons = db.execute('SELECT * FROM coupons WHERE store_id=? AND customer_id=? AND used_order IS NULL',(store['id'],user['user_id'])).fetchall()
+                return self.send({'member':dict(member) if member else None,'coupons':[dict(c) for c in coupons]})
             if path == '/api/image-library':
                 return self.send({'images':dish_media.CATALOG})
             image_match = re.fullmatch(r'/api/dish-images/([a-f0-9]{32})',path)
@@ -372,6 +424,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not image:
                     raise APIError('图片不存在',404)
                 live = db.execute('SELECT 1 FROM menu_items m JOIN stores s ON s.id=m.store_id WHERE m.image_url=? AND m.active=1 AND m.available=1 AND s.published=1',(path,)).fetchone()
+                if not live:
+                    live = db.execute('SELECT 1 FROM stores WHERE published=1 AND config_json LIKE ?',('%'+path+'%',)).fetchone()
                 if not live:
                     user = self.session(db,optional=True)
                     owner = db.execute('SELECT owner_id FROM stores WHERE id=?',(image['store_id'],)).fetchone()
@@ -406,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'user': None} if not user else {'user': {'id':user['user_id'], 'username':'本设备顾客' if user['username'].startswith('guest_') else user['username'], 'role':user['role']}, 'csrf':user['csrf_token']})
             if path == '/api/merchant/store':
                 user = self.session(db, 'merchant')
-                return self.send({'store':serialize_store(db,get_store(db,user['user_id']),True), 'ocr':ocr_cloud.configuration(), 'public_url':PUBLIC_URL})
+                return self.send({'store':serialize_store(db,get_store(db,user['user_id']),True), 'ocr':ocr_cloud.configuration(), 'public_url':PUBLIC_URL, 'ai_configured':bool(os.getenv('STORE_AI_API_KEY')), 'ai_logo_configured':store_config.logo_configured()})
             if path == '/api/merchant/orders':
                 user = self.session(db, 'merchant')
                 store = get_store(db, user['user_id'])
@@ -502,6 +556,50 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute('DELETE FROM sessions WHERE token_hash=?',(user['token_hash'],))
                     db.commit()
                     return self.send({'ok':True},cookie='snap_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+('; Secure' if SECURE_COOKIE else ''))
+                expire_orders(db)
+                db.commit()
+                db.execute('BEGIN IMMEDIATE')
+                if path == '/api/merchant/logo-generate':
+                    if user['role'] != 'merchant': raise APIError('需要商家账号',403)
+                    db.commit()
+                    self.limit('logo-ai:'+user['user_id'],10,3600)
+                    try: result=store_config.generate_logo(data.get('name',''),data.get('theme','universal'),data.get('prompt',''))
+                    except ValueError as e: raise APIError(str(e),400)
+                    return self.send(result)
+                if path == '/api/merchant/recommend':
+                    if user['role'] != 'merchant': raise APIError('需要商家账号',403)
+                    db.commit()
+                    self.limit('recommend:'+user['user_id'],20,3600)
+                    store = get_store(db,user['user_id'])
+                    images = []
+                    if data.get('use_images') is True and os.getenv('STORE_AI_API_KEY'):
+                        for table, url in [('store_logos',data.get('logo_url')),('dish_images',data.get('banner_url'))]:
+                            if url:
+                                row = db.execute('SELECT mime,image FROM '+table+' WHERE id=? AND store_id=?',(str(url).rsplit('/',1)[-1],store['id'])).fetchone()
+                                if not row: raise APIError('参考图片不属于当前门店',403)
+                                images.append('data:'+row['mime']+';base64,'+base64.b64encode(row['image']).decode())
+                    db.commit()
+                    try: result = store_config.recommendation(data.get('description',''),images)
+                    except ValueError as e: raise APIError(str(e))
+                    return self.send(result)
+                marketing = re.fullmatch(r'/api/stores/([a-f0-9]{24})/(join|claim|spin)',path)
+                if marketing:
+                    if user['role'] != 'customer': raise APIError('需要顾客会话',403)
+                    store = db.execute('SELECT * FROM stores WHERE id=? AND published=1',(marketing[1],)).fetchone()
+                    if not store: raise APIError('店铺不存在',404)
+                    config = store_config.normalize(json.loads(store['config_json']))
+                    action = marketing[2]; module = {'join':'membership','claim':'coupons','spin':'wheel'}[action]
+                    if not config['modules'][module]: raise APIError('门店尚未启用此模块',403)
+                    if action == 'join':
+                        db.execute('INSERT OR IGNORE INTO members(store_id,customer_id,points,created_at) VALUES(?,?,0,?)',(store['id'],user['user_id'],now()))
+                        db.commit(); return self.send({'message':'已加入本店会员，模拟支付每满一元积一分。'})
+                    day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                    try: db.execute('INSERT INTO benefit_claims(store_id,customer_id,kind,day) VALUES(?,?,?,?)',(store['id'],user['user_id'],action,day))
+                    except sqlite3.IntegrityError: raise APIError('今天已参与，请明天再来',409)
+                    win = action == 'claim' or secrets.randbelow(2) == 0
+                    if win:
+                        db.execute('INSERT INTO coupons(id,store_id,customer_id,amount_cents,minimum_cents,created_at) VALUES(?,?,?,?,?,?)',(secrets.token_hex(12),store['id'],user['user_id'],store_config.amount(config['coupon']['amount']),store_config.amount(config['coupon']['minimum']),now()))
+                    db.commit(); return self.send({'won':win,'message':'已获得优惠券，下单时可使用。' if win else '谢谢参与，明天再来。'})
                 if path in ('/api/merchant/draft','/api/merchant/publish'):
                     if user['role'] != 'merchant':
                         raise APIError('需要商家账号',403)
@@ -510,6 +608,10 @@ class Handler(BaseHTTPRequestHandler):
                     name = text(data.get('name',store['draft_name'] or store['name']), '店铺名称', 50)
                     brand = normalized_brand(data.get('brand'), db, store['id'])
                     items = normalized_items(data.get('items'), publish=publishing)
+                    try: config = store_config.normalize(data.get('config',json.loads(store['config_draft_json'])))
+                    except ValueError as e: raise APIError(str(e))
+                    if config['banner_url'] and not db.execute('SELECT id FROM dish_images WHERE id=? AND store_id=?',(config['banner_url'].rsplit('/',1)[-1],store['id'])).fetchone():
+                        raise APIError('店铺封面不属于当前店铺',403)
                     for item in items:
                         url = item['image_url']
                         if url and url.startswith('/api/dish-images/') and not db.execute('SELECT id FROM dish_images WHERE id=? AND store_id=?',(url.rsplit('/',1)[1],store['id'])).fetchone():
@@ -519,6 +621,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise APIError('菜单原图不属于当前店铺',403)
                     stamp = now()
                     if publishing:
+                        published_ids={row['id'] for row in db.execute('SELECT id FROM menu_items WHERE store_id=?',(store['id'],))}
                         # Existing dishes remain as inactive rows, preserving historical foreign keys.
                         db.execute('UPDATE menu_items SET active=0 WHERE store_id=?',(store['id'],))
                         for position,item in enumerate(items):
@@ -531,6 +634,14 @@ class Handler(BaseHTTPRequestHandler):
                                 confidence=excluded.confidence,source_id=excluded.source_id,image_url=excluded.image_url,updated_at=excluded.updated_at''',
                                 (item['id'],store['id'],item['name'],cents(item['price']),item['category'],int(item['available']),position,item['confidence'],source_id,item['image_url'],stamp))
                         db.execute('UPDATE stores SET name=?,brand_json=?,published=1 WHERE id=?',(name,json.dumps(brand,ensure_ascii=False),store['id']))
+                        db.execute('UPDATE stores SET config_json=? WHERE id=?',(json.dumps(config,ensure_ascii=False),store['id']))
+                    for item in items:
+                        if publishing:
+                            current = db.execute('SELECT stock FROM menu_items WHERE id=?',(item['id'],)).fetchone()
+                            stock = item['stock'] if item['stock_update'] or item['id'] not in published_ids else current['stock']
+                            db.execute('UPDATE menu_items SET details_json=?,stock=? WHERE id=?',(json.dumps({'description':item['description'],'options':item['options']},ensure_ascii=False),stock,item['id']))
+                            item['stock']=stock; item['stock_update']=False
+                    db.execute('UPDATE stores SET config_draft_json=? WHERE id=?',(json.dumps(config,ensure_ascii=False),store['id']))
                     db.execute('UPDATE stores SET draft_name=?,draft_json=?,draft_source_id=?,brand_draft_json=?,updated_at=? WHERE id=?',
                                (name,json.dumps(items,ensure_ascii=False),source_id,json.dumps(brand,ensure_ascii=False),stamp,store['id']))
                     db.commit()
@@ -539,12 +650,23 @@ class Handler(BaseHTTPRequestHandler):
                     if user['role'] != 'customer':
                         raise APIError('请使用顾客账号下单',403)
                     return self.create_order(db,user,data)
-                match = re.fullmatch(r'/api/orders/([a-f0-9]{24})/(pay|status)',path)
+                match = re.fullmatch(r'/api/orders/([a-f0-9]{24})/(pay|status|cancel|reject)',path)
                 if match:
                     order = self.owned_order(db,user,match[1])
-                    if match[2] == 'pay':
+                    if order['resolution']: raise APIError('订单已结束，无法继续操作',409)
+                    if match[2] in ('cancel','reject'):
+                        if match[2] == 'cancel' and (user['role'] != 'customer' or order['status'] != 'pending'): raise APIError('仅可取消待确认订单',409)
+                        if match[2] == 'reject' and user['role'] != 'merchant': raise APIError('只有商家可以拒单',403)
+                        reason = text(data.get('reason','顾客取消' if match[2]=='cancel' else ''),'取消/拒单原因',200)
+                        release_order(db,order,'cancelled' if match[2]=='cancel' else 'rejected',reason)
+                    elif match[2] == 'pay':
                         if user['role'] != 'customer':
                             raise APIError('只有下单顾客可以模拟支付',403)
+                        payment_store = db.execute('SELECT config_json FROM stores WHERE id=?',(order['store_id'],)).fetchone()
+                        member_enabled = store_config.normalize(json.loads(payment_store['config_json']))['modules']['membership']
+                        if order['payment_status'] == 'unpaid' and member_enabled:
+                            awarded = db.execute('UPDATE members SET points=points+? WHERE store_id=? AND customer_id=?',(order['total_cents']//100,order['store_id'],order['customer_id'])).rowcount
+                            if awarded: db.execute('UPDATE orders SET points_awarded=? WHERE id=?',(order['total_cents']//100,order['id']))
                         db.execute("UPDATE orders SET payment_status='demo_paid',updated_at=? WHERE id=?",(now(),order['id']))
                     else:
                         if user['role'] != 'merchant':
@@ -650,29 +772,52 @@ class Handler(BaseHTTPRequestHandler):
         store = db.execute('SELECT * FROM stores WHERE id=? AND published=1',(store_id,)).fetchone()
         if not store:
             raise APIError('店铺尚未发布菜单',404)
+        config = store_config.normalize(json.loads(store['config_json']))
+        if not config['modules']['ordering']: raise APIError('本店暂未开启在线点单',403)
         cart = data.get('cart')
         if not isinstance(cart,dict) or not 1 <= len(cart) <= 100:
             raise APIError('请先选择菜品')
         rows, total = [], 0
-        for identifier, quantity in cart.items():
+        for line_id, quantity in cart.items():
+            if not isinstance(line_id,str): raise APIError('菜品编号无效')
+            identifier = line_id.split('::')[0]
             if not isinstance(quantity,int) or isinstance(quantity,bool) or not 1 <= quantity <= 99:
                 raise APIError('每道菜数量须为 1～99')
             item = db.execute('SELECT * FROM menu_items WHERE id=? AND store_id=? AND active=1 AND available=1',(identifier,store_id)).fetchone()
             if not item:
                 raise APIError('菜品已下架，请刷新菜单后重新选择',409)
             # Reject stale displayed prices instead of charging an unexpected new total.
-            expected = data.get('prices',{}).get(identifier) if isinstance(data.get('prices'),dict) else None
-            if expected is None or cents(expected) != item['price_cents']:
+            details = json.loads(item['details_json'])
+            groups = details.get('options',[])
+            selections = data.get('selections',{}).get(line_id,[]) if isinstance(data.get('selections',{}),dict) else []
+            if not isinstance(selections,list) or len(selections)!=len(groups): raise APIError('请选择完整规格',409)
+            labels=[]; unit_price=item['price_cents']
+            for group, choice_index in zip(groups,selections):
+                if isinstance(choice_index,bool) or not isinstance(choice_index,int) or not 0<=choice_index<len(group['choices']): raise APIError('规格已变化，请重新选择',409)
+                choice=group['choices'][choice_index]; unit_price+=store_config.amount(choice['extra']); labels.append(group['name']+':'+choice['name'])
+            if item['stock'] is not None:
+                changed = db.execute('UPDATE menu_items SET stock=stock-? WHERE id=? AND stock>=?',(quantity,item['id'],quantity)).rowcount
+                if not changed: raise APIError('库存不足，请减少数量或选择其他菜品',409)
+            expected = data.get('prices',{}).get(line_id) if isinstance(data.get('prices'),dict) else None
+            if expected is None or cents(expected) != unit_price:
                 raise APIError('菜单价格已更新，请刷新并确认新价格后下单',409)
-            total += item['price_cents'] * quantity
-            rows.append((item,quantity))
+            total += unit_price * quantity
+            rows.append((item,quantity,unit_price,item['name']+('（'+'，'.join(labels)+'）' if labels else '')))
+        coupon = None; discount = 0
+        if data.get('coupon_id'):
+            if not (config['modules']['coupons'] or config['modules']['wheel']): raise APIError('门店未启用优惠券')
+            coupon = db.execute('SELECT * FROM coupons WHERE id=? AND store_id=? AND customer_id=? AND used_order IS NULL',(data['coupon_id'],store_id,user['user_id'])).fetchone()
+            if not coupon or total < coupon['minimum_cents']: raise APIError('优惠券不可用或未达到使用门槛',409)
+            discount = min(coupon['amount_cents'],total-1); total-=discount
         note = text(data.get('note',''),'备注',300,required=False)
         identifier,stamp = secrets.token_hex(12),now()
         db.execute('INSERT INTO orders(id,store_id,customer_id,total_cents,note,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
                    (identifier,store_id,user['user_id'],total,note,key,stamp,stamp))
-        for item,qty in rows:
+        db.execute('UPDATE orders SET discount_cents=?,coupon_id=? WHERE id=?',(discount,coupon['id'] if coupon else None,identifier))
+        if coupon: db.execute('UPDATE coupons SET used_order=? WHERE id=?',(identifier,coupon['id']))
+        for item,qty,price,label in rows:
             db.execute('INSERT INTO order_items(order_id,menu_item_id,name_snapshot,price_cents_snapshot,quantity) VALUES(?,?,?,?,?)',
-                       (identifier,item['id'],item['name'],item['price_cents'],qty))
+                       (identifier,item['id'],label,price,qty))
         db.commit()
         self.send({'order':serialize_order(db,db.execute('SELECT * FROM orders WHERE id=?',(identifier,)).fetchone())},201)
 
