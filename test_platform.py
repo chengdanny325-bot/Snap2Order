@@ -27,7 +27,7 @@ class Platform(unittest.TestCase):
         self.m.signup('m'+secrets.token_hex(5),'merchant');self.c.signup('c','customer');self.other.signup('o','customer')
         self.store=self.m.request('/api/merchant/store')[1]['store']['id']
         self.items=[{'id':secrets.token_hex(8),'name':'奶茶','price':10,'category':'饮品','checked':True,'stock':5,'options':[{'name':'大小','choices':[{'name':'小','extra':0},{'name':'大','extra':3}]},{'name':'加料','choices':[{'name':'无','extra':0},{'name':'珍珠','extra':2}]}]}]
-        self.config=store_config.normalize({'modules':dict.fromkeys(store_config.MODULES,True),'profile':{'description':'社区茶店'},'coupon':{'amount':5,'minimum':20}})
+        self.config=store_config.normalize({'modules':{**dict.fromkeys(store_config.MODULES,True),'oc':False},'profile':{'description':'社区茶店'},'coupon':{'amount':5,'minimum':20}})
         self.publish()
     def publish(self,config=None,items=None):
         code,d=self.m.request('/api/merchant/publish',{'name':'茶店','items':items or self.items,'config':config or self.config});self.assertEqual(code,200,d);return d
@@ -94,7 +94,7 @@ class Platform(unittest.TestCase):
             result=store_config.recommendation('社区咖啡');self.assertEqual(result['source'],'rules');self.assertTrue(result['fallback'])
 
     def test_points_rules_checkin_daka_register_bonus(self):
-        cfg=store_config.normalize({'modules':dict.fromkeys(store_config.MODULES,True),'points':{'per_spend':10,'earn':5,'register_bonus':20,'checkin':3,'daka':8}})
+        cfg=store_config.normalize({'modules':{**dict.fromkeys(store_config.MODULES,True),'oc':False},'points':{'per_spend':10,'earn':5,'register_bonus':20,'checkin':3,'daka':8}})
         self.publish(cfg)
         code,d=self.c.request('/api/stores/'+self.store+'/join',{});self.assertEqual(code,200,d);self.assertEqual(d['points'],20)
         code,d=self.c.request('/api/stores/'+self.store+'/join',{});self.assertEqual(code,200,d);self.assertIsNone(d['points'])
@@ -116,7 +116,7 @@ class Platform(unittest.TestCase):
         self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'earn':-1}}})[0],400)
         self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'earn':1.5}}})[0],400)
         self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'bogus':1}}})[0],400)
-        cfg=store_config.normalize({'modules':dict.fromkeys(store_config.MODULES,True),'points':{'per_spend':20,'earn':5}})
+        cfg=store_config.normalize({'modules':{**dict.fromkeys(store_config.MODULES,True),'oc':False},'points':{'per_spend':20,'earn':5}})
         self.publish(cfg)
         self.c.request('/api/stores/'+self.store+'/join',{})
         _,d=self.order();self.assertEqual(d['order']['total'],15)
@@ -126,6 +126,38 @@ class Platform(unittest.TestCase):
         self.publish(cfg)
         self.assertEqual(self.c.request('/api/stores/'+self.store+'/checkin',{})[0],403)
         self.assertEqual(self.c.request('/api/stores/'+self.store+'/daka',{})[0],403)
+    def test_oc_shop_flow(self):
+        cfg=store_config.normalize({'modules':{'ordering':True,'membership':True,'oc':True},'points':{'register_bonus':100},'oc':{'name':'团团','image_url':'/api/oc-images/'+self.store}})
+        self.publish(cfg)
+        self.assertEqual(self.other.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'hat'})[0],409)
+        self.c.request('/api/stores/'+self.store+'/join',{})
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'rocket'})[0],400)
+        code,d=self.c.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'hat'});self.assertEqual(code,200,d);self.assertEqual(d['points'],50);self.assertIn('hat',d['owned'])
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'hat'})[0],409)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'crown'})[0],409)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/benefits')[1]['member']['points'],50)
+        self.other.request('/api/stores/'+self.store+'/join',{})
+        self.assertIn('hat',self.other.request('/api/stores/'+self.store+'/benefits')[1]['oc']['owned'])
+        self.publish(store_config.normalize({'modules':{'ordering':True,'membership':True}}))
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/oc/buy',{'item_id':'bow'})[0],403)
+    def test_oc_config_and_generate(self):
+        self.assertEqual(self.m.request('/api/merchant/publish',{'name':'茶店','items':self.items,'config':{'modules':{'ordering':True,'membership':True,'oc':True}}})[0],400)
+        self.assertEqual(self.m.request('/api/merchant/publish',{'name':'茶店','items':self.items,'config':{'modules':{'ordering':True,'oc':True},'oc':{'image_url':'/api/oc-images/'+self.store}}})[0],400)
+        self.assertEqual(self.m.request('/api/merchant/publish',{'name':'茶店','items':self.items,'config':{'modules':{'ordering':True,'membership':True,'oc':True},'oc':{'image_url':'/api/oc-images/'+'0'*24}}})[0],403)
+        self.assertEqual(self.c.request('/api/merchant/oc-generate',{'description':'橘色小猫'})[0],403)
+        with patch.dict('os.environ',{'AI_LOGO_API_KEY':'','STORE_AI_API_KEY':'','AI_LOGO_API_URL':'','AI_LOGO_MODEL':''}):
+            self.assertEqual(self.m.request('/api/merchant/oc-generate',{'description':'橘色小猫'})[0],400)
+        import base64
+        raw=Path('static/assets/oc/hat.png').read_bytes()
+        response=io.BytesIO(json.dumps({'data':[{'b64_json':base64.b64encode(raw).decode()}]}).encode())
+        with patch.dict('os.environ',{'AI_LOGO_API_KEY':'test-only','AI_LOGO_API_URL':'https://example.test/images/generations','AI_LOGO_MODEL':'test-model'}),patch('store_config.urllib.request.urlopen',return_value=response):
+            code,d=self.m.request('/api/merchant/oc-generate',{'name':'团团','description':'橘色小猫，圆眼睛'})
+            self.assertEqual(code,200,d);self.assertEqual(d['image_url'],'/api/oc-images/'+self.store)
+        code,img=self.c.request('/api/oc-images/'+self.store);self.assertEqual(code,200);self.assertEqual(img,raw)
+        cfg=store_config.normalize({'modules':{'ordering':True,'membership':True,'oc':True},'oc':{'name':'团团','image_url':d['image_url']}})
+        self.publish(cfg)
+        live=self.c.request('/api/stores/'+self.store)[1]['store'];self.assertEqual(live['config']['oc']['name'],'团团')
+        code,catalog=self.c.request('/api/oc-catalog');self.assertEqual(code,200);self.assertEqual(len(catalog['decorations']),6);self.assertEqual(len(catalog['actions']),4)
     def test_restaurant_themes_and_custom_category(self):
         for theme in ('universal','western','hotpot'):
             code,d=self.m.request('/api/merchant/publish',{'name':'餐厅','items':[dict(self.items[0],category='自定义烧烤')],'config':self.config,'brand':{'theme':theme}})

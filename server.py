@@ -75,7 +75,7 @@ def init_db():
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version > 5:
+        if version > 6:
             raise RuntimeError('数据库版本较新，请使用对应版本的服务')
         db.executescript((ROOT / 'schema.sql').read_text())
         columns = {r['name'] for r in db.execute('PRAGMA table_info(menu_items)')}
@@ -96,7 +96,7 @@ def init_db():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
             for column, definition in columns_to_add:
                 if column not in existing: db.execute('ALTER TABLE '+table+' ADD COLUMN '+column+' '+definition)
-        db.execute('PRAGMA user_version=5')
+        db.execute('PRAGMA user_version=6')
         db.execute('UPDATE stores SET draft_name=name WHERE draft_name IS NULL')
         # Interrupted OCR jobs can be retried; never show an endless processing state.
         db.execute("UPDATE ocr_sources SET status='failed', error='识别被服务重启中断，请重试。' WHERE status='processing'")
@@ -377,6 +377,8 @@ class Handler(BaseHTTPRequestHandler):
                 filename = routes[path]
             elif path in dish_media.STOCK_URLS:
                 filename = path.removeprefix('/')
+            elif re.fullmatch(r'/assets/oc/[a-z]+\.(svg|png)', path):
+                filename = path[1:]
             elif path in ('/style.css', '/common.js', '/auth.js', '/merchant.js', '/orders.js', '/customer.js', '/camera.js', '/shops.js', '/favicon.svg'):
                 filename = path[1:]
             else:
@@ -417,9 +419,17 @@ class Handler(BaseHTTPRequestHandler):
                 coupons = db.execute('SELECT * FROM coupons WHERE store_id=? AND customer_id=? AND used_order IS NULL',(store['id'],user['user_id'])).fetchall()
                 day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
                 claims = db.execute('SELECT kind FROM benefit_claims WHERE store_id=? AND customer_id=? AND day=?',(store['id'],user['user_id'],day)).fetchall()
-                return self.send({'member':dict(member) if member else None,'coupons':[dict(c) for c in coupons],'claims':[c['kind'] for c in claims]})
+                result = {'member':dict(member) if member else None,'coupons':[dict(c) for c in coupons],'claims':[c['kind'] for c in claims]}
+                config = store_config.normalize(json.loads(store['config_json']))
+                if config['modules']['oc']:
+                    owned = db.execute('SELECT item_id FROM oc_purchases WHERE store_id=?',(store['id'],)).fetchall()
+                    result['oc'] = {'owned':[r['item_id'] for r in owned]}
+                return self.send(result)
             if path == '/api/image-library':
                 return self.send({'images':dish_media.CATALOG})
+            if path == '/api/oc-catalog':
+                import oc_catalog
+                return self.send(oc_catalog.catalog())
             image_match = re.fullmatch(r'/api/dish-images/([a-f0-9]{32})',path)
             if image_match:
                 image = db.execute('SELECT * FROM dish_images WHERE id=?',(image_match[1],)).fetchone()
@@ -454,6 +464,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Cache-Control','private, no-store')
                 self.send_header('Content-Length',str(len(logo['image'])))
                 self.end_headers();self.wfile.write(logo['image']);return
+            oc_match = re.fullmatch(r'/api/oc-images/([a-f0-9]{24})',path)
+            if oc_match:
+                image = db.execute('SELECT * FROM store_oc WHERE store_id=?',(oc_match[1],)).fetchone()
+                if not image:
+                    raise APIError('图片不存在',404)
+                live = db.execute('SELECT 1 FROM stores WHERE id=? AND published=1',(oc_match[1],)).fetchone()
+                if not live:
+                    user = self.session(db,optional=True)
+                    owner = db.execute('SELECT owner_id FROM stores WHERE id=?',(oc_match[1],)).fetchone()
+                    if not user or user['user_id']!=owner['owner_id']:
+                        raise APIError('图片不存在',404)
+                self.send_response(200);self.common_headers()
+                self.send_header('Content-Type',image['mime'])
+                self.send_header('Cache-Control','private, no-store')
+                self.send_header('Content-Length',str(len(image['image'])))
+                self.end_headers();self.wfile.write(image['image']);return
             if path == '/api/stores':
                 rows = db.execute('SELECT id,name,brand_json FROM stores WHERE published=1 ORDER BY created_at DESC LIMIT 100').fetchall()
                 return self.send({'stores':[{'id':r['id'],'name':r['name'],**parse_brand(r['brand_json'])} for r in rows]})
@@ -572,6 +598,19 @@ class Handler(BaseHTTPRequestHandler):
                     try: result=store_config.generate_logo(data.get('name',''),data.get('theme','universal'),data.get('prompt',''))
                     except ValueError as e: raise APIError(str(e),400)
                     return self.send(result)
+                if path == '/api/merchant/oc-generate':
+                    if user['role'] != 'merchant': raise APIError('需要商家账号',403)
+                    db.commit()
+                    self.limit('oc-ai:'+user['user_id'],10,3600)
+                    store = get_store(db,user['user_id'])
+                    name = text(data.get('name',''),'OC 名字',30)
+                    description = text(data.get('description',''),'OC 描述',500)
+                    try: result=store_config.generate_oc(name,description)
+                    except ValueError as e: raise APIError(str(e),400)
+                    db.execute('BEGIN IMMEDIATE')
+                    db.execute('INSERT OR REPLACE INTO store_oc(store_id,name,description,mime,image,created_at) VALUES(?,?,?,?,?,?)',(store['id'],name,description,result['mime'],result['image'],now()))
+                    db.commit()
+                    return self.send({'image_url':'/api/oc-images/'+store['id'],'name':name,'description':description})
                 if path == '/api/merchant/recommend':
                     if user['role'] != 'merchant': raise APIError('需要商家账号',403)
                     db.commit()
@@ -620,6 +659,26 @@ class Handler(BaseHTTPRequestHandler):
                     if win:
                         db.execute('INSERT INTO coupons(id,store_id,customer_id,amount_cents,minimum_cents,created_at) VALUES(?,?,?,?,?,?)',(secrets.token_hex(12),store['id'],user['user_id'],store_config.amount(config['coupon']['amount']),store_config.amount(config['coupon']['minimum']),now()))
                     db.commit(); return self.send({'won':win,'message':'已获得优惠券，下单时可使用。' if win else '谢谢参与，明天再来。'})
+                oc_buy = re.fullmatch(r'/api/stores/([a-f0-9]{24})/oc/buy',path)
+                if oc_buy:
+                    if user['role'] != 'customer': raise APIError('需要顾客会话',403)
+                    store = db.execute('SELECT * FROM stores WHERE id=? AND published=1',(oc_buy[1],)).fetchone()
+                    if not store: raise APIError('店铺不存在',404)
+                    config = store_config.normalize(json.loads(store['config_json']))
+                    if not config['modules']['oc']: raise APIError('门店尚未启用此模块',403)
+                    import oc_catalog
+                    item_id = data.get('item_id')
+                    item = oc_catalog.find(item_id)
+                    if not item: raise APIError('商品不存在',400)
+                    member = db.execute('SELECT points FROM members WHERE store_id=? AND customer_id=?',(store['id'],user['user_id'])).fetchone()
+                    if not member: raise APIError('请先加入本店会员',409)
+                    try: db.execute('INSERT INTO oc_purchases(store_id,item_id,buyer_id,created_at) VALUES(?,?,?,?)',(store['id'],item_id,user['user_id'],now()))
+                    except sqlite3.IntegrityError: raise APIError('该商品已解锁，全店共享',409)
+                    deducted = db.execute('UPDATE members SET points=points-? WHERE store_id=? AND customer_id=? AND points>=?',(item['price'],store['id'],user['user_id'],item['price'])).rowcount
+                    if not deducted: raise APIError('积分不足，还差 '+str(item['price']-member['points'])+' 分',409)
+                    db.commit()
+                    owned = [r['item_id'] for r in db.execute('SELECT item_id FROM oc_purchases WHERE store_id=?',(store['id'],))]
+                    return self.send({'points':member['points']-item['price'],'owned':owned,'message':'已为 '+(config['oc']['name'] or 'OC')+' 解锁「'+item['name']+'」'})
                 if path in ('/api/merchant/draft','/api/merchant/publish'):
                     if user['role'] != 'merchant':
                         raise APIError('需要商家账号',403)
@@ -632,6 +691,8 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError as e: raise APIError(str(e))
                     if config['banner_url'] and not db.execute('SELECT id FROM dish_images WHERE id=? AND store_id=?',(config['banner_url'].rsplit('/',1)[-1],store['id'])).fetchone():
                         raise APIError('店铺封面不属于当前店铺',403)
+                    if config['oc']['image_url'] and config['oc']['image_url'] != '/api/oc-images/'+store['id']:
+                        raise APIError('OC 形象不属于当前店铺',403)
                     for item in items:
                         url = item['image_url']
                         if url and url.startswith('/api/dish-images/') and not db.execute('SELECT id FROM dish_images WHERE id=? AND store_id=?',(url.rsplit('/',1)[1],store['id'])).fetchone():
