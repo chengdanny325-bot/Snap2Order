@@ -1,0 +1,5 @@
+'use strict';
+let stores=[];
+function renderShops(){header('customer');$('#app').innerHTML=heading('FIND YOUR SMALL SHOP','选一家小店，吃点喜欢的。','扫码可以直接进入对应商家；也可以在这里选择已开业的小店。')+'<label class="shop-search">搜索店名<input id="search" type="search" placeholder="输入店铺名称" autocomplete="off"></label><div id="storeList" class="shop-list"></div>';$('#search').oninput=e=>showStores(e.target.value);showStores('');}
+function showStores(query){const filtered=stores.filter(s=>s.name.toLowerCase().includes(query.toLowerCase()));$('#storeList').innerHTML=filtered.length?filtered.map(s=>`<article class="panel shop-card"><span class="shop-mark" aria-hidden="true">▧</span><div><h2>${esc(s.name)}</h2><p class="hint">现点现做 · 无需注册</p></div><a class="button primary" href="/s/${s.id}">进店点餐 →</a></article>`).join(''):'<section class="panel empty"><h2>暂时没有找到小店</h2><p>试试其他店名，或扫描商家的专属二维码。</p></section>';}
+api('stores').then(d=>{stores=d.stores;renderShops();}).catch(fail);
