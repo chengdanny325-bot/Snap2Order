@@ -49,3 +49,18 @@ async function action(button, fn) {
 function bindAction(selector, fn) {const b=$(selector);if(b)b.onclick=()=>action(b,fn);}
 
 async function customerSession(){const d=await api('customer/session',{});me=d.user;csrf=d.csrf;return true;}
+
+const BRAND_THEMES=[
+  {id:'fresh',name:'清新自然',desc:'竹韵绿意，清爽亲切',swatches:['#235c43','#fffefa','#f3f4ed']},
+  {id:'minimal',name:'极简黑白',desc:'去彩色，突出内容本身',swatches:['#222222','#ffffff','#f7f7f7']},
+  {id:'vibrant',name:'潮流暖橙',desc:'高饱和暖色，年轻有活力',swatches:['#e0492f','#fffaf4','#fdeee2']},
+  {id:'classic',name:'中式典雅',desc:'深红米金，衬线标题',swatches:['#8c3b2e','#faf5ea','#f0e7d4']},
+  {id:'cute',name:'可爱粉嫩',desc:'圆润字体与波点，活泼亲切',swatches:['#e5568f','#fff7fb','#ffeef5']},
+  {id:'luxury',name:'奢华黑金',desc:'深色底配金色，高端质感',swatches:['#c9a15a','#1e1a15','#131110']},
+];
+const themeName=id=>(BRAND_THEMES.find(t=>t.id===id)||BRAND_THEMES[0]).name;
+function applyBrand(brand){
+  const theme=BRAND_THEMES.find(t=>t.id===((brand&&brand.theme)||'fresh'))||BRAND_THEMES[0];
+  document.documentElement.dataset.theme=theme.id;
+  const meta=document.querySelector('meta[name=theme-color]');if(meta)meta.content=theme.swatches[0];
+}

@@ -1,4 +1,0 @@
-# Runtime is Python 3.11+ standard library plus a bundled pure-Python QR library.
-# No pip install is needed: segno==1.6.6 is already included under vendor/.
-# For maintainers who replace the bundled vendor package:
-# segno==1.6.6

@@ -4,3 +4,5 @@ data/
 __pycache__/
 data.json
 uploaded-menu
+
+.DS_Store
