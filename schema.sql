@@ -65,4 +65,17 @@ CREATE TABLE IF NOT EXISTS store_logos (
  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS store_logos_store ON store_logos(store_id);
-PRAGMA user_version = 4;
+CREATE TABLE IF NOT EXISTS members (
+ store_id TEXT NOT NULL REFERENCES stores(id), customer_id TEXT NOT NULL REFERENCES users(id),
+ points INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(store_id,customer_id)
+);
+CREATE TABLE IF NOT EXISTS coupons (
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL REFERENCES stores(id), customer_id TEXT NOT NULL REFERENCES users(id),
+ amount_cents INTEGER NOT NULL, minimum_cents INTEGER NOT NULL, used_order TEXT, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS coupons_owner ON coupons(store_id,customer_id);
+CREATE TABLE IF NOT EXISTS benefit_claims (
+ store_id TEXT NOT NULL REFERENCES stores(id), customer_id TEXT NOT NULL REFERENCES users(id),
+ kind TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(store_id,customer_id,kind,day)
+);
+PRAGMA user_version = 5;
