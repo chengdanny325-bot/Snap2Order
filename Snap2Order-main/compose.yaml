@@ -1,0 +1,27 @@
+services:
+  snap2order:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8765"
+      DATABASE_PATH: /data/snap2order.sqlite3
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      OCR_PROVIDER: ${OCR_PROVIDER:-ocrspace}
+      OCR_LANGUAGE: ${OCR_LANGUAGE:-chs}
+      OCR_ENGINE: ${OCR_ENGINE:-2}
+      OCR_MAX_IMAGE_BYTES: ${OCR_MAX_IMAGE_BYTES:-950000}
+      OCR_API_KEY: ${OCR_API_KEY:-}
+      OCR_MODEL: ${OCR_MODEL:-qwen3-vl-plus}
+      OCR_API_URL: ${OCR_API_URL:-https://api.ocr.space/parse/image}
+      OCR_PROVIDER_LABEL: ${OCR_PROVIDER_LABEL:-OCR.space}
+      WECHAT_APP_ID: ${WECHAT_APP_ID:-}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET:-}
+      WECHAT_CODE_ENV: ${WECHAT_CODE_ENV:-release}
+    volumes:
+      - snap2order-data:/data
+    restart: unless-stopped
+volumes:
+  snap2order-data:
