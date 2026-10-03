@@ -142,6 +142,47 @@ class Integration(unittest.TestCase):
         self.assertNotEqual(a['token'],b['token'])
         self.assertNotIn('openid',a);self.assertNotIn('session_key',a)
 
+    def test_15_brand_draft_isolation_and_logo(self):
+        photo=(server.ROOT/'static/assets/dishes/noodles.png').read_bytes()
+        outsider=Client(self.base)
+        self.assertEqual(outsider.request('/api/merchant/logo',photo,raw=True)[0],401)
+        self.assertEqual(self.ma.request('/api/merchant/logo',photo,raw=True,csrf=False)[0],403)
+        self.assertEqual(self.ma.request('/api/merchant/logo',b'<svg/>',raw=True)[0],415)
+        code,data=self.ma.request('/api/merchant/logo',photo,raw=True)
+        self.assertEqual(code,201);logo=data['logo_url']
+        try:
+            # Saving a draft must not change the public storefront.
+            draft={'name':'品牌测试店','items':self.items,'brand':{'logo_url':logo,'theme':'vibrant'}}
+            self.assertEqual(self.ma.request('/api/merchant/draft',draft)[0],200)
+            _,d=outsider.request('/api/stores/'+self.store)
+            self.assertEqual(d['store']['name'],'测试小店')
+            self.assertEqual(d['store']['brand'],{'logo_url':None,'theme':'fresh'})
+            self.assertEqual(outsider.request(logo)[0],404)
+            self.assertEqual(self.mb.request(logo)[0],404)
+            self.assertEqual(self.ma.request(logo)[1],photo)
+            # Publishing applies name, theme and logo together.
+            self.assertEqual(self.ma.request('/api/merchant/publish',draft)[0],200)
+            _,d=outsider.request('/api/stores/'+self.store)
+            self.assertEqual(d['store']['name'],'品牌测试店')
+            self.assertEqual(d['store']['brand'],{'logo_url':logo,'theme':'vibrant'})
+            self.assertEqual(outsider.request(logo)[1],photo)
+            _,listing=outsider.request('/api/stores')
+            row=[s for s in listing['stores'] if s['id']==self.store][0]
+            self.assertEqual(row['theme'],'vibrant');self.assertEqual(row['logo_url'],logo)
+            # Validation: bad theme, foreign or malformed logo references.
+            self.assertEqual(self.ma.request('/api/merchant/draft',{'items':self.items,'brand':{'theme':'neon'}})[0],400)
+            for theme in ('fresh','minimal','vibrant','classic','cute','luxury'):
+                self.assertEqual(self.ma.request('/api/merchant/draft',{'items':self.items,'brand':{'theme':theme}})[0],200,theme)
+            self.assertEqual(self.mb.request('/api/merchant/draft',{'items':[dict(i,id='mb-'+i['id']) for i in self.items],'brand':{'logo_url':logo,'theme':'fresh'}})[0],403)
+            self.assertEqual(self.ma.request('/api/merchant/draft',{'items':self.items,'brand':{'logo_url':'https://example.com/x.png'}})[0],400)
+            self.assertEqual(self.ma.request('/api/merchant/draft',{'items':self.items,'brand':{'logo_url':'/api/store-logos/'+'0'*32}})[0],403)
+        finally:
+            self.ma.request('/api/merchant/publish',{'name':'测试小店','items':self.items,'brand':{'logo_url':None,'theme':'fresh'}})
+        _,d=outsider.request('/api/stores/'+self.store)
+        self.assertEqual(d['store']['name'],'测试小店')
+        self.assertEqual(d['store']['brand'],{'logo_url':None,'theme':'fresh'})
+        self.assertEqual(outsider.request(logo)[0],404)
+
     def test_10_password_storage_and_integrity(self):
         with server.connect() as db:
             stored=db.execute('SELECT password_hash FROM users WHERE username=?',('merchant_a',)).fetchone()[0]

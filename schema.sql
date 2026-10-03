@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS stores (
  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL UNIQUE REFERENCES users(id), name TEXT NOT NULL,
  published INTEGER NOT NULL DEFAULT 0 CHECK(published IN (0,1)),
- draft_json TEXT NOT NULL DEFAULT '[]', draft_source_id TEXT,
+ draft_json TEXT NOT NULL DEFAULT '[]', draft_source_id TEXT, draft_name TEXT,
+ brand_json TEXT NOT NULL DEFAULT '{}', brand_draft_json TEXT NOT NULL DEFAULT '{}',
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -58,4 +59,10 @@ CREATE TABLE IF NOT EXISTS dish_images (
  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS dish_images_store ON dish_images(store_id);
-PRAGMA user_version = 3;
+CREATE TABLE IF NOT EXISTS store_logos (
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL REFERENCES stores(id),
+ mime TEXT NOT NULL CHECK(mime IN ('image/jpeg','image/png')), image BLOB NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS store_logos_store ON store_logos(store_id);
+PRAGMA user_version = 4;

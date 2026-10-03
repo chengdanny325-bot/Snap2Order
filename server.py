@@ -73,12 +73,19 @@ def init_db():
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version > 3:
+        if version > 4:
             raise RuntimeError('数据库版本较新，请使用对应版本的服务')
         db.executescript((ROOT / 'schema.sql').read_text())
         columns = {r['name'] for r in db.execute('PRAGMA table_info(menu_items)')}
         if 'image_url' not in columns:
             db.execute('ALTER TABLE menu_items ADD COLUMN image_url TEXT')
+        store_columns = {r['name'] for r in db.execute('PRAGMA table_info(stores)')}
+        for column, ddl in [('draft_name', 'ALTER TABLE stores ADD COLUMN draft_name TEXT'),
+                            ('brand_json', "ALTER TABLE stores ADD COLUMN brand_json TEXT NOT NULL DEFAULT '{}'"),
+                            ('brand_draft_json', "ALTER TABLE stores ADD COLUMN brand_draft_json TEXT NOT NULL DEFAULT '{}'")]:
+            if column not in store_columns:
+                db.execute(ddl)
+        db.execute('UPDATE stores SET draft_name=name WHERE draft_name IS NULL')
         # Interrupted OCR jobs can be retried; never show an endless processing state.
         db.execute("UPDATE ocr_sources SET status='failed', error='识别被服务重启中断，请重试。' WHERE status='processing'")
         db.execute('DELETE FROM sessions WHERE expires_at < ?', (int(time.time()),))
@@ -163,6 +170,39 @@ def normalized_items(raw, publish=False):
     return result
 
 
+BRAND_THEMES = ('fresh', 'minimal', 'vibrant', 'classic', 'cute', 'luxury')
+
+
+def parse_brand(raw):
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    theme = data.get('theme')
+    logo_url = data.get('logo_url')
+    return {'logo_url': logo_url if isinstance(logo_url, str) and re.fullmatch(r'/api/store-logos/[a-f0-9]{32}', logo_url) else None,
+            'theme': theme if theme in BRAND_THEMES else 'fresh'}
+
+
+def normalized_brand(raw, db, store_id):
+    if raw is None:
+        return {'logo_url': None, 'theme': 'fresh'}
+    if not isinstance(raw, dict):
+        raise APIError('品牌配置格式错误')
+    theme = raw.get('theme', 'fresh')
+    if theme not in BRAND_THEMES:
+        raise APIError('品牌风格无效，请重新选择')
+    logo_url = raw.get('logo_url') or None
+    if logo_url is not None:
+        if not isinstance(logo_url, str) or not re.fullmatch(r'/api/store-logos/[a-f0-9]{32}', logo_url):
+            raise APIError('Logo 地址无效，请重新上传')
+        if not db.execute('SELECT id FROM store_logos WHERE id=? AND store_id=?', (logo_url.rsplit('/', 1)[1], store_id)).fetchone():
+            raise APIError('Logo 不属于当前店铺', 403)
+    return {'logo_url': logo_url, 'theme': theme}
+
+
 def get_store(db, user_id):
     store = db.execute('SELECT * FROM stores WHERE owner_id=?', (user_id,)).fetchone()
     if not store:
@@ -174,9 +214,11 @@ def serialize_store(db, store, merchant=False):
     rows = db.execute('SELECT * FROM menu_items WHERE store_id=? AND active=1 ORDER BY position', (store['id'],)).fetchall()
     items = [{'id': i['id'], 'name': i['name'], 'price': i['price_cents']/100, 'category': i['category'],
               'image_url': i['image_url'], 'available': bool(i['available']), 'checked': True, 'confidence': i['confidence']} for i in rows if merchant or i['available']]
-    result = {'id': store['id'], 'name': store['name'], 'published': bool(store['published']), 'items': items}
+    result = {'id': store['id'], 'name': store['name'], 'published': bool(store['published']),
+              'brand': parse_brand(store['brand_json']), 'items': items}
     if merchant:
-        result.update(draft=json.loads(store['draft_json']), source_id=store['draft_source_id'])
+        result.update(draft=json.loads(store['draft_json']), source_id=store['draft_source_id'],
+                      draft_name=store['draft_name'] or store['name'], brand_draft=parse_brand(store['brand_draft_json']))
     return result
 
 
@@ -340,9 +382,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Cache-Control','private, no-store')
                 self.send_header('Content-Length',str(len(image['image'])))
                 self.end_headers();self.wfile.write(image['image']);return
+            logo_match = re.fullmatch(r'/api/store-logos/([a-f0-9]{32})',path)
+            if logo_match:
+                logo = db.execute('SELECT * FROM store_logos WHERE id=?',(logo_match[1],)).fetchone()
+                if not logo:
+                    raise APIError('图片不存在',404)
+                live = db.execute('SELECT 1 FROM stores WHERE id=? AND published=1 AND brand_json LIKE ?',(logo['store_id'],'%'+path+'%')).fetchone()
+                if not live:
+                    user = self.session(db,optional=True)
+                    owner = db.execute('SELECT owner_id FROM stores WHERE id=?',(logo['store_id'],)).fetchone()
+                    if not user or user['user_id']!=owner['owner_id']:
+                        raise APIError('图片不存在',404)
+                self.send_response(200);self.common_headers()
+                self.send_header('Content-Type',logo['mime'])
+                self.send_header('Cache-Control','private, no-store')
+                self.send_header('Content-Length',str(len(logo['image'])))
+                self.end_headers();self.wfile.write(logo['image']);return
             if path == '/api/stores':
-                rows = db.execute('SELECT id,name FROM stores WHERE published=1 ORDER BY created_at DESC LIMIT 100').fetchall()
-                return self.send({'stores':[dict(r) for r in rows]})
+                rows = db.execute('SELECT id,name,brand_json FROM stores WHERE published=1 ORDER BY created_at DESC LIMIT 100').fetchall()
+                return self.send({'stores':[{'id':r['id'],'name':r['name'],**parse_brand(r['brand_json'])} for r in rows]})
             if path == '/api/me':
                 user = self.session(db, optional=True)
                 return self.send({'user': None} if not user else {'user': {'id':user['user_id'], 'username':'本设备顾客' if user['username'].startswith('guest_') else user['username'], 'role':user['role']}, 'csrf':user['csrf_token']})
@@ -425,6 +483,8 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == '/api/merchant/dish-images':
                 return self.upload_dish_image()
+            if path == '/api/merchant/logo':
+                return self.upload_logo()
             if path == '/api/merchant/ocr':
                 return self.upload_ocr()
             data = self.body()
@@ -446,8 +506,10 @@ class Handler(BaseHTTPRequestHandler):
                     if user['role'] != 'merchant':
                         raise APIError('需要商家账号',403)
                     store = get_store(db,user['user_id'])
-                    name = text(data.get('name',store['name']), '店铺名称', 50)
-                    items = normalized_items(data.get('items'), publish=path.endswith('/publish'))
+                    publishing = path.endswith('/publish')
+                    name = text(data.get('name',store['draft_name'] or store['name']), '店铺名称', 50)
+                    brand = normalized_brand(data.get('brand'), db, store['id'])
+                    items = normalized_items(data.get('items'), publish=publishing)
                     for item in items:
                         url = item['image_url']
                         if url and url.startswith('/api/dish-images/') and not db.execute('SELECT id FROM dish_images WHERE id=? AND store_id=?',(url.rsplit('/',1)[1],store['id'])).fetchone():
@@ -456,7 +518,7 @@ class Handler(BaseHTTPRequestHandler):
                     if source_id and not db.execute('SELECT id FROM ocr_sources WHERE id=? AND store_id=?',(source_id,store['id'])).fetchone():
                         raise APIError('菜单原图不属于当前店铺',403)
                     stamp = now()
-                    if path.endswith('/publish'):
+                    if publishing:
                         # Existing dishes remain as inactive rows, preserving historical foreign keys.
                         db.execute('UPDATE menu_items SET active=0 WHERE store_id=?',(store['id'],))
                         for position,item in enumerate(items):
@@ -468,9 +530,9 @@ class Handler(BaseHTTPRequestHandler):
                                 category=excluded.category,available=excluded.available,active=1,position=excluded.position,
                                 confidence=excluded.confidence,source_id=excluded.source_id,image_url=excluded.image_url,updated_at=excluded.updated_at''',
                                 (item['id'],store['id'],item['name'],cents(item['price']),item['category'],int(item['available']),position,item['confidence'],source_id,item['image_url'],stamp))
-                        db.execute('UPDATE stores SET published=1 WHERE id=?',(store['id'],))
-                    db.execute('UPDATE stores SET name=?,draft_json=?,draft_source_id=?,updated_at=? WHERE id=?',
-                               (name,json.dumps(items,ensure_ascii=False),source_id,stamp,store['id']))
+                        db.execute('UPDATE stores SET name=?,brand_json=?,published=1 WHERE id=?',(name,json.dumps(brand,ensure_ascii=False),store['id']))
+                    db.execute('UPDATE stores SET draft_name=?,draft_json=?,draft_source_id=?,brand_draft_json=?,updated_at=? WHERE id=?',
+                               (name,json.dumps(items,ensure_ascii=False),source_id,json.dumps(brand,ensure_ascii=False),stamp,store['id']))
                     db.commit()
                     return self.send({'ok':True,'store':serialize_store(db,get_store(db,user['user_id']),True)})
                 if path == '/api/customer/orders':
@@ -629,6 +691,22 @@ class Handler(BaseHTTPRequestHandler):
             db.execute('INSERT INTO dish_images(id,store_id,mime,image,created_at) VALUES(?,?,?,?,?)',
                        (identifier,store['id'],mime,raw,now()))
         self.send({'image_url':'/api/dish-images/'+identifier},201)
+
+    def upload_logo(self):
+        with connect() as db:
+            user = self.session(db,'merchant',csrf=True)
+            store = get_store(db,user['user_id'])
+        raw = self.body(image=True)
+        try:
+            mime = dish_media.raster_type(raw,'Logo 图片')
+        except dish_media.MediaError as e:
+            raise APIError(str(e),415 if len(raw)<=2*1024*1024 else 413)
+        self.limit('logo:'+store['id'],30,3600)
+        identifier = secrets.token_hex(32)[:32]
+        with connect() as db:
+            db.execute('INSERT INTO store_logos(id,store_id,mime,image,created_at) VALUES(?,?,?,?,?)',
+                       (identifier,store['id'],mime,raw,now()))
+        self.send({'logo_url':'/api/store-logos/'+identifier},201)
 
     def upload_ocr(self):
         with connect() as db:

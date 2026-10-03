@@ -15,10 +15,10 @@ for item in CATALOG:
  item['url']='/assets/dishes/'+item['id']+'.png'
 STOCK_URLS={i['url'] for i in CATALOG}
 
-def raster_type(raw):
+def raster_type(raw, label='菜品照片'):
  """Check format, dimensions and basic structure; browsers encode uploads as JPEG."""
  if not 0 < len(raw) <= 2*1024*1024:
-  raise MediaError('菜品照片请小于 2MB。')
+  raise MediaError(label + '请小于 2MB。')
  width=height=0
  if raw.startswith(b'\x89PNG\r\n\x1a\n'):
   if len(raw)<33 or raw[12:16]!=b'IHDR' or b'IEND' not in raw[-20:]:
