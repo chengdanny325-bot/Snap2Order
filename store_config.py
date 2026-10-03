@@ -21,6 +21,11 @@ def amount(value, maximum=999999):
     except (ValueError, InvalidOperation):
         raise ValueError('金额须为非负数，最多两位小数')
 
+def points_count(value, label, maximum=100000):
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise ValueError(label+'须为 0～'+str(maximum)+' 的整数')
+    return value
+
 def normalize(raw):
     raw = raw or {}
     if not isinstance(raw, dict): raise ValueError('门店配置格式错误')
@@ -42,9 +47,19 @@ def normalize(raw):
     threshold = amount(coupon.get('minimum', 30), 999999) / 100
     if modules.get('coupons') or modules.get('wheel'):
         if value <= 0 or threshold <= value: raise ValueError('优惠金额须大于零，使用门槛须高于优惠金额')
+    points = raw.get('points') or {}
+    if not isinstance(points, dict): raise ValueError('积分规则格式错误')
+    if any(key not in ('per_spend', 'earn', 'register_bonus', 'checkin', 'daka') for key in points): raise ValueError('积分规则格式错误')
+    per_spend = amount(points.get('per_spend', 1), 1000000) / 100
+    if modules.get('membership') and per_spend <= 0: raise ValueError('消费积分门槛须大于零')
+    points = {'per_spend': per_spend,
+              'earn': points_count(points.get('earn', 1), '消费积分'),
+              'register_bonus': points_count(points.get('register_bonus', 0), '注册赠送积分'),
+              'checkin': points_count(points.get('checkin', 1), '签到积分'),
+              'daka': points_count(points.get('daka', 2), '打卡积分')}
     return {'version': 1, 'profile': profile, 'banner_url': banner, 'layout': layout,
             'modules': {key: modules.get(key, key == 'ordering') for key in MODULES},
-            'coupon': {'amount': value, 'minimum': threshold}}
+            'coupon': {'amount': value, 'minimum': threshold}, 'points': points}
 
 def item_details(item):
     stock = item.get('stock')

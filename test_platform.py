@@ -93,6 +93,39 @@ class Platform(unittest.TestCase):
         with patch.dict('os.environ',{'STORE_AI_API_KEY':'test-only'}),patch('store_config.urllib.request.urlopen',side_effect=OSError()):
             result=store_config.recommendation('社区咖啡');self.assertEqual(result['source'],'rules');self.assertTrue(result['fallback'])
 
+    def test_points_rules_checkin_daka_register_bonus(self):
+        cfg=store_config.normalize({'modules':dict.fromkeys(store_config.MODULES,True),'points':{'per_spend':10,'earn':5,'register_bonus':20,'checkin':3,'daka':8}})
+        self.publish(cfg)
+        code,d=self.c.request('/api/stores/'+self.store+'/join',{});self.assertEqual(code,200,d);self.assertEqual(d['points'],20)
+        code,d=self.c.request('/api/stores/'+self.store+'/join',{});self.assertEqual(code,200,d);self.assertIsNone(d['points'])
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/benefits')[1]['member']['points'],20)
+        code,d=self.c.request('/api/stores/'+self.store+'/checkin',{});self.assertEqual(code,200,d);self.assertEqual(d['points'],23)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/checkin',{})[0],409)
+        code,d=self.c.request('/api/stores/'+self.store+'/daka',{});self.assertEqual(code,200,d);self.assertEqual(d['points'],31)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/daka',{})[0],409)
+        self.assertEqual(self.other.request('/api/stores/'+self.store+'/checkin',{})[0],409)
+        self.assertEqual(self.other.request('/api/stores/'+self.store+'/daka',{})[0],409)
+        _,d=self.order(2);oid=d['order']['id'];self.assertEqual(d['order']['total'],30)
+        self.c.request('/api/orders/'+oid+'/pay',{})
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/benefits')[1]['member']['points'],46)
+        self.c.request('/api/orders/'+oid+'/cancel',{'reason':'取消'})
+        benefits=self.c.request('/api/stores/'+self.store+'/benefits')[1]
+        self.assertEqual(benefits['member']['points'],31);self.assertIn('checkin',benefits['claims']);self.assertIn('daka',benefits['claims'])
+    def test_points_config_validation_and_threshold(self):
+        self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'per_spend':0}}})[0],400)
+        self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'earn':-1}}})[0],400)
+        self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'earn':1.5}}})[0],400)
+        self.assertEqual(self.m.request('/api/merchant/draft',{'items':self.items,'config':{'modules':{'membership':True},'points':{'bogus':1}}})[0],400)
+        cfg=store_config.normalize({'modules':dict.fromkeys(store_config.MODULES,True),'points':{'per_spend':20,'earn':5}})
+        self.publish(cfg)
+        self.c.request('/api/stores/'+self.store+'/join',{})
+        _,d=self.order();self.assertEqual(d['order']['total'],15)
+        self.c.request('/api/orders/'+d['order']['id']+'/pay',{})
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/benefits')[1]['member']['points'],0)
+        cfg=store_config.normalize({'modules':{'ordering':True}})
+        self.publish(cfg)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/checkin',{})[0],403)
+        self.assertEqual(self.c.request('/api/stores/'+self.store+'/daka',{})[0],403)
     def test_restaurant_themes_and_custom_category(self):
         for theme in ('universal','western','hotpot'):
             code,d=self.m.request('/api/merchant/publish',{'name':'餐厅','items':[dict(self.items[0],category='自定义烧烤')],'config':self.config,'brand':{'theme':theme}})

@@ -415,7 +415,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not store: raise APIError('店铺不存在',404)
                 member = db.execute('SELECT * FROM members WHERE store_id=? AND customer_id=?',(store['id'],user['user_id'])).fetchone()
                 coupons = db.execute('SELECT * FROM coupons WHERE store_id=? AND customer_id=? AND used_order IS NULL',(store['id'],user['user_id'])).fetchall()
-                return self.send({'member':dict(member) if member else None,'coupons':[dict(c) for c in coupons]})
+                day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                claims = db.execute('SELECT kind FROM benefit_claims WHERE store_id=? AND customer_id=? AND day=?',(store['id'],user['user_id'],day)).fetchall()
+                return self.send({'member':dict(member) if member else None,'coupons':[dict(c) for c in coupons],'claims':[c['kind'] for c in claims]})
             if path == '/api/image-library':
                 return self.send({'images':dish_media.CATALOG})
             image_match = re.fullmatch(r'/api/dish-images/([a-f0-9]{32})',path)
@@ -470,21 +472,25 @@ class Handler(BaseHTTPRequestHandler):
                 user = self.session(db, 'customer')
                 rows = db.execute('SELECT * FROM orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 200',(user['user_id'],)).fetchall()
                 return self.send({'orders':[serialize_order(db,o) for o in rows]})
-            if path == '/api/merchant/qrcode':
+            if path in ('/api/merchant/qrcode','/api/merchant/qrcode-daka'):
                 user = self.session(db, 'merchant')
                 store = get_store(db,user['user_id'])
                 if not store['published']:
                     raise APIError('请先发布菜单',400)
+                if path.endswith('-daka'):
+                    config = store_config.normalize(json.loads(store['config_json']))
+                    if not config['modules']['membership']:
+                        raise APIError('请先在模块设置中启用会员积分',400)
                 import segno
                 origin = PUBLIC_URL or ('http://' + self.headers.get('Host','localhost:8765'))
-                link = origin + '/s/' + store['id']
+                link = origin + '/s/' + store['id'] + ('?daka=1' if path.endswith('-daka') else '')
                 qr = segno.make(link, error='m', micro=False)
                 import io
                 buffer = io.BytesIO(); qr.save(buffer, kind='svg', scale=7, border=4)
                 body = buffer.getvalue()
                 self.send_response(200); self.common_headers()
                 self.send_header('Content-Type','image/svg+xml')
-                self.send_header('Content-Disposition', 'attachment; filename="store-'+store['id']+'.svg"')
+                self.send_header('Content-Disposition', 'attachment; filename="store-'+store['id']+('-daka' if path.endswith('-daka') else '')+'.svg"')
                 self.send_header('Cache-Control','private, no-store')
                 self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body); return
             if path == '/api/merchant/minicode':
@@ -582,17 +588,31 @@ class Handler(BaseHTTPRequestHandler):
                     try: result = store_config.recommendation(data.get('description',''),images)
                     except ValueError as e: raise APIError(str(e))
                     return self.send(result)
-                marketing = re.fullmatch(r'/api/stores/([a-f0-9]{24})/(join|claim|spin)',path)
+                marketing = re.fullmatch(r'/api/stores/([a-f0-9]{24})/(join|claim|spin|checkin|daka)',path)
                 if marketing:
                     if user['role'] != 'customer': raise APIError('需要顾客会话',403)
                     store = db.execute('SELECT * FROM stores WHERE id=? AND published=1',(marketing[1],)).fetchone()
                     if not store: raise APIError('店铺不存在',404)
                     config = store_config.normalize(json.loads(store['config_json']))
-                    action = marketing[2]; module = {'join':'membership','claim':'coupons','spin':'wheel'}[action]
+                    action = marketing[2]; module = {'join':'membership','claim':'coupons','spin':'wheel','checkin':'membership','daka':'membership'}[action]
                     if not config['modules'][module]: raise APIError('门店尚未启用此模块',403)
                     if action == 'join':
-                        db.execute('INSERT OR IGNORE INTO members(store_id,customer_id,points,created_at) VALUES(?,?,0,?)',(store['id'],user['user_id'],now()))
-                        db.commit(); return self.send({'message':'已加入本店会员，模拟支付每满一元积一分。'})
+                        bonus = config['points']['register_bonus'] if config['points']['register_bonus'] > 0 else 0
+                        joined = db.execute('INSERT OR IGNORE INTO members(store_id,customer_id,points,created_at) VALUES(?,?,?,?)',(store['id'],user['user_id'],bonus,now())).rowcount
+                        db.commit()
+                        if joined and bonus: return self.send({'message':'已加入本店会员，注册赠送 '+str(bonus)+' 积分。','points':bonus})
+                        return self.send({'message':'已加入本店会员，消费可获得积分。','points':bonus if joined else None})
+                    if action in ('checkin','daka'):
+                        member = db.execute('SELECT points FROM members WHERE store_id=? AND customer_id=?',(store['id'],user['user_id'])).fetchone()
+                        if not member: raise APIError('请先加入本店会员',409)
+                        day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                        try: db.execute('INSERT INTO benefit_claims(store_id,customer_id,kind,day) VALUES(?,?,?,?)',(store['id'],user['user_id'],action,day))
+                        except sqlite3.IntegrityError: raise APIError('今天已参与，请明天再来',409)
+                        gain = config['points'][action]
+                        db.execute('UPDATE members SET points=points+? WHERE store_id=? AND customer_id=?',(gain,store['id'],user['user_id']))
+                        db.commit()
+                        label = '签到' if action == 'checkin' else '打卡'
+                        return self.send({'won':True,'points':member['points']+gain,'message':label+'成功，获得 '+str(gain)+' 积分。'})
                     day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
                     try: db.execute('INSERT INTO benefit_claims(store_id,customer_id,kind,day) VALUES(?,?,?,?)',(store['id'],user['user_id'],action,day))
                     except sqlite3.IntegrityError: raise APIError('今天已参与，请明天再来',409)
@@ -663,10 +683,12 @@ class Handler(BaseHTTPRequestHandler):
                         if user['role'] != 'customer':
                             raise APIError('只有下单顾客可以模拟支付',403)
                         payment_store = db.execute('SELECT config_json FROM stores WHERE id=?',(order['store_id'],)).fetchone()
-                        member_enabled = store_config.normalize(json.loads(payment_store['config_json']))['modules']['membership']
-                        if order['payment_status'] == 'unpaid' and member_enabled:
-                            awarded = db.execute('UPDATE members SET points=points+? WHERE store_id=? AND customer_id=?',(order['total_cents']//100,order['store_id'],order['customer_id'])).rowcount
-                            if awarded: db.execute('UPDATE orders SET points_awarded=? WHERE id=?',(order['total_cents']//100,order['id']))
+                        payment_config = store_config.normalize(json.loads(payment_store['config_json']))
+                        if order['payment_status'] == 'unpaid' and payment_config['modules']['membership']:
+                            per_spend_cents = store_config.amount(payment_config['points']['per_spend'])
+                            earned = (order['total_cents']//per_spend_cents)*payment_config['points']['earn'] if per_spend_cents > 0 else 0
+                            awarded = db.execute('UPDATE members SET points=points+? WHERE store_id=? AND customer_id=?',(earned,order['store_id'],order['customer_id'])).rowcount
+                            if awarded: db.execute('UPDATE orders SET points_awarded=? WHERE id=?',(earned,order['id']))
                         db.execute("UPDATE orders SET payment_status='demo_paid',updated_at=? WHERE id=?",(now(),order['id']))
                     else:
                         if user['role'] != 'merchant':
