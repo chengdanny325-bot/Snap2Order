@@ -1,0 +1,62 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "artifact_f249e8fe9edc0a0915e37992",
+      "current_revision_id": "revision_83ba3447e5a24a6d7f31d9cf",
+      "filename": "task_pack.json",
+      "kind": "data",
+      "mime": "application/json",
+      "rel_path": "ppt_decks/snap2order_pitch_20261004_102932/task_pack.json",
+      "revisions": [
+        {
+          "artifact_revision_id": "revision_83ba3447e5a24a6d7f31d9cf",
+          "produced_at": "2026-10-04T10:29:44+08:00",
+          "sha256": "e0fd5075376f624ff9a82b893ceaf06621669fdce3f141eac05a03e7012a4f8a",
+          "size": 1541,
+          "turn_id": "local_1791080950699_5zw0kqze"
+        }
+      ]
+    },
+    {
+      "artifact_id": "artifact_470291406f2bcc99db74d1d7",
+      "current_revision_id": "revision_42aa8272c9ec6a1caebd48a3",
+      "filename": "present.html",
+      "kind": "document",
+      "mime": "text/html",
+      "rel_path": "ppt_decks/snap2order_pitch_20261004_102932/present.html",
+      "revisions": [
+        {
+          "artifact_revision_id": "revision_42aa8272c9ec6a1caebd48a3",
+          "produced_at": "2026-10-04T10:56:59+08:00",
+          "sha256": "11c2ee1f8e1b4aa7693c382a7355f927358dcd4d41ca6057c41743e8424f0b8f",
+          "size": 4863,
+          "turn_id": "local_1791080950699_5zw0kqze"
+        }
+      ]
+    },
+    {
+      "artifact_id": "artifact_529b5ce3c076aef7ad8a7a37",
+      "current_revision_id": "revision_36ee048bb6463fbb8a8bc97a",
+      "filename": "snap2order_pitch_20261004_102932.pptx",
+      "kind": "presentation",
+      "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "rel_path": "ppt_decks/snap2order_pitch_20261004_102932/snap2order_pitch_20261004_102932.pptx",
+      "revisions": [
+        {
+          "artifact_revision_id": "revision_36ee048bb6463fbb8a8bc97a",
+          "produced_at": "2026-10-04T10:57:59+08:00",
+          "sha256": "7249495ec7bf71bfe62f32cab1310072c950808d971155ce4c083fc6b94eb17d",
+          "size": 5994267,
+          "turn_id": "local_1791080950699_5zw0kqze"
+        }
+      ]
+    }
+  ],
+  "created_at": "2026-10-04T01:45:59.246967+00:00",
+  "current_turn_id": "local_1791082964992_a94y037t",
+  "execution_status": "completed",
+  "schema_version": 3,
+  "session_id": "82436933-3d9f-48b3-be49-7b851c09f9ec",
+  "task_id": "task_1791078358328_3m8sx2h3",
+  "updated_at": "2026-10-04T03:03:51.708657+00:00"
+}
