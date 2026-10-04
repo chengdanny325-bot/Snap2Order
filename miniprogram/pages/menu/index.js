@@ -1,7 +1,8 @@
 const {API_BASE}=require('../../config');
 const menuItem=i=>({...i,imageURL:i.image_url?API_BASE.replace(/\/$/,'')+i.image_url:'',imageLabel:i.image_url?(i.image_url.startsWith('/assets/dishes/')?'素材示意图':'商家实拍'):'',qty:0,displayPrice:i.price.toFixed(2)});
 const key=()=>Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2);
-Page({
+const {withLanguage}=require('../../i18n');
+Page(withLanguage({
  data:{store:null,items:[],total:'0.00',note:'',order:null,error:'',busy:false,orderStatus:''},cart:{},requestKey:'',
  async onLoad(options){this.storeID=decodeURIComponent(options.scene||options.store||'');this.requestKey=key();if(!/^[a-f0-9]{24}$/.test(this.storeID)){this.setData({error:'店铺链接无效'});return;}try{const d=await getApp().request('stores/'+this.storeID);this.setData({store:d.store,items:d.store.items.map(menuItem)});}catch(e){this.setData({error:e.message});}},
  onShow(){if(this.data.order)this.startPolling();},onHide(){clearInterval(this.poll);},onUnload(){clearInterval(this.poll);},
@@ -12,4 +13,4 @@ Page({
  async pay(){if(this.data.busy)return;this.setData({busy:true,error:''});try{const d=await getApp().customerRequest('orders/'+this.data.order.id+'/pay',{},'POST');this.updateOrder(d.order);}catch(e){this.setData({error:e.message});}finally{this.setData({busy:false});}},
  startPolling(){clearInterval(this.poll);this.poll=setInterval(async()=>{try{const d=await getApp().customerRequest('orders/'+this.data.order.id);this.updateOrder(d.order);}catch{}},5000);},
  orders(){wx.navigateTo({url:'/pages/orders/index'});}
-});
+}));

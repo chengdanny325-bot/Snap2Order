@@ -293,3 +293,20 @@ class OriginConfigurationTests(unittest.TestCase):
             handler.headers['Sec-Fetch-Site'] = 'cross-site'
             with self.assertRaises(server.APIError):
                 handler.check_origin()
+
+
+class BrandTemplateConfigurationTests(unittest.TestCase):
+    def test_template_and_color_are_saved_independently(self):
+        brand = server.normalized_brand({'template':'fresh','theme':'luxury'}, None, 'unused')
+        restored = server.parse_brand(json.dumps(brand))
+        self.assertEqual(restored['template'], 'fresh')
+        self.assertEqual(restored['theme'], 'luxury')
+
+    def test_existing_brand_infers_template_without_changing_color(self):
+        restored = server.parse_brand(json.dumps({'theme':'hotpot'}))
+        self.assertEqual(restored['template'], 'hotpot')
+        self.assertEqual(restored['theme'], 'hotpot')
+
+    def test_invalid_template_is_rejected(self):
+        with self.assertRaises(server.APIError):
+            server.normalized_brand({'template':'unknown','theme':'fresh'}, None, 'unused')

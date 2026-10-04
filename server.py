@@ -199,24 +199,28 @@ def parse_brand(raw):
     theme = data.get('theme')
     logo_url = data.get('logo_url')
     return {'logo_url': logo_url if isinstance(logo_url, str) and re.fullmatch(r'/api/store-logos/[a-f0-9]{32}', logo_url) else None,
-            'theme': theme if theme in BRAND_THEMES else 'fresh'}
+            'theme': theme if theme in BRAND_THEMES else 'fresh',
+            'template': data.get('template') if data.get('template') in BRAND_THEMES else (theme if theme in BRAND_THEMES else 'fresh')}
 
 
 def normalized_brand(raw, db, store_id):
     if raw is None:
-        return {'logo_url': None, 'theme': 'fresh'}
+        return {'logo_url': None, 'theme': 'fresh', 'template': 'fresh'}
     if not isinstance(raw, dict):
         raise APIError('品牌配置格式错误')
     theme = raw.get('theme', 'fresh')
     if theme not in BRAND_THEMES:
         raise APIError('品牌风格无效，请重新选择')
+    template = raw.get('template', theme)
+    if template not in BRAND_THEMES:
+        raise APIError('业态模板无效，请重新选择')
     logo_url = raw.get('logo_url') or None
     if logo_url is not None:
         if not isinstance(logo_url, str) or not re.fullmatch(r'/api/store-logos/[a-f0-9]{32}', logo_url):
             raise APIError('Logo 地址无效，请重新上传')
         if not db.execute('SELECT id FROM store_logos WHERE id=? AND store_id=?', (logo_url.rsplit('/', 1)[1], store_id)).fetchone():
             raise APIError('Logo 不属于当前店铺', 403)
-    return {'logo_url': logo_url, 'theme': theme}
+    return {'logo_url': logo_url, 'theme': theme, 'template': template}
 
 
 def get_store(db, user_id):
@@ -384,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                 filename = path.removeprefix('/')
             elif re.fullmatch(r'/assets/oc/[a-z]+\.(svg|png)', path):
                 filename = path[1:]
-            elif path in ('/style.css', '/common.js', '/auth.js', '/merchant.js', '/orders.js', '/customer.js', '/camera.js', '/shops.js', '/favicon.svg'):
+            elif path in ('/style.css', '/i18n.js', '/common.js', '/auth.js', '/merchant.js', '/orders.js', '/customer.js', '/camera.js', '/shops.js', '/favicon.svg'):
                 filename = path[1:]
             else:
                 raise APIError('页面不存在', 404)

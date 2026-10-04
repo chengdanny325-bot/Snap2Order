@@ -1,1 +1,2 @@
-Page({data:{stores:[],error:''},async onShow(){try{const d=await getApp().request('stores');this.setData({stores:d.stores,error:''});}catch(e){this.setData({error:e.message});}},open(e){wx.navigateTo({url:'/pages/menu/index?store='+e.currentTarget.dataset.id});},orders(){wx.navigateTo({url:'/pages/orders/index'});}});
+const {withLanguage}=require('../../i18n');
+Page(withLanguage({data:{stores:[],error:''},async onShow(){try{const d=await getApp().request('stores');this.setData({stores:d.stores,error:''});}catch(e){this.setData({error:e.message});}},open(e){wx.navigateTo({url:'/pages/menu/index?store='+e.currentTarget.dataset.id});},orders(){wx.navigateTo({url:'/pages/orders/index'});}}));

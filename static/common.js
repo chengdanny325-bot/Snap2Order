@@ -38,13 +38,13 @@ function header(kind='public', name='') {
   if(kind==='merchant') nav=`<a href="/merchant/menu" ${location.pathname==='/merchant/menu'?'aria-current="page"':''}>我的菜单</a><a href="/merchant/orders" ${location.pathname==='/merchant/orders'?'aria-current="page"':''}>接单工作台</a>`;
   if(kind==='customer') nav='<a href="/shops">选择小店</a><a href="/customer/orders">本设备订单</a>';
   const home=kind==='merchant'?'/merchant/menu':'/';
-  $('#header').innerHTML=`<a class="brand" href="${home}"><span class="brand-symbol" aria-hidden="true">▧</span><span>一扫开店<small>${kind==='merchant'?'商家工作台':name?esc(name):'SNAP2ORDER'}</small></span></a><nav aria-label="页面导航">${nav}</nav><div class="account">${kind==='customer'?'<span class="hint">扫码点单 · 无需注册</span>':me?`<span>${esc(me.username)}</span><button class="quiet" id="logout">退出</button>`:`<a href="${loginURL('merchant')}">登录 / 注册</a>`}</div>`;
+  $('#header').innerHTML=`<a class="brand" href="${home}"><span class="brand-symbol" aria-hidden="true">▧</span><span>YOUR SHOP STARTS HERE<small>${kind==='merchant'?'商家工作台':name?esc(name):'SNAP2ORDER'}</small></span></a><nav aria-label="页面导航">${nav}</nav><div class="account">${kind==='customer'?'<span class="hint">扫码点单 · 无需注册</span>':me?`<span>${esc(me.username)}</span><button class="quiet" id="logout">退出</button>`:`<a href="${loginURL('merchant')}">登录 / 注册</a>`}</div>`;
   const logout=$('#logout'); if(logout)logout.onclick=async()=>{try{await api('auth/logout',{});for(const key of Object.keys(sessionStorage)){if(key.startsWith('snap_cart_')||key==='snap_pending_cart')sessionStorage.removeItem(key);}me=null;csrf='';location.href=kind==='merchant'?'/login?role=merchant':location.pathname.startsWith('/s/')?location.pathname:'/';}catch(e){fail(e);}};
 }
 function heading(tag,title,description) {return `<div class="eyebrow">${tag}</div><h1>${title}</h1><p class="lead">${description}</p>`;}
 const statusName=s=>({cancelled:'已取消',rejected:'商家拒单',expired:'超时关闭',pending:'待确认',preparing:'制作中',completed:'已完成 / 待取餐'}[s]||s);
 function lines(o) {return o.items.map(i=>`<div class="row cart-row"><span>${esc(i.name)} × ${i.qty}</span><b>${money(i.price*i.qty)}</b></div>`).join('');}
-function displayTime(t) {return new Date(t).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+function displayTime(t) {return new Date(t).toLocaleString(uiLanguage==='en'?'en-GB':'zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 async function action(button, fn) {
   if(button.disabled)return;button.disabled=true;button.setAttribute('aria-busy','true');
   try{await fn();}catch(e){fail(e);}finally{if(button.isConnected){button.disabled=false;button.removeAttribute('aria-busy');}}
@@ -54,19 +54,28 @@ function bindAction(selector, fn) {const b=$(selector);if(b)b.onclick=()=>action
 async function customerSession(){const d=await api('customer/session',{});me=d.user;csrf=d.csrf;return true;}
 
 const BRAND_THEMES=[
-  {id:'fresh',name:'清新自然',desc:'竹韵绿意，清爽亲切',swatches:['#235c43','#fffefa','#f3f4ed']},
-  {id:'minimal',name:'极简黑白',desc:'去彩色，突出内容本身',swatches:['#222222','#ffffff','#f7f7f7']},
-  {id:'vibrant',name:'潮流暖橙',desc:'高饱和暖色，年轻有活力',swatches:['#e0492f','#fffaf4','#fdeee2']},
-  {id:'classic',name:'中式典雅',desc:'深红米金，衬线标题',swatches:['#8c3b2e','#faf5ea','#f0e7d4']},
-  {id:'cute',name:'可爱粉嫩',desc:'圆润字体与波点，活泼亲切',swatches:['#e5568f','#fff7fb','#ffeef5']},
-  {id:'luxury',name:'奢华黑金',desc:'深色底配金色，高端质感',swatches:['#c9a15a','#1e1a15','#131110']},
+  {id:'fresh',name:'和风日料',desc:'日料 · 寿司 · 轻食',swatches:['#235c43','#fffefa','#f3f4ed']},
+  {id:'minimal',name:'街角咖啡',desc:'咖啡 · 烘焙',swatches:['#222222','#ffffff','#f7f7f7']},
+  {id:'vibrant',name:'烟火小食',desc:'小吃 · 快餐',swatches:['#e0492f','#fffaf4','#fdeee2']},
+  {id:'classic',name:'雅宴中餐',desc:'中餐 · 家常菜',swatches:['#8c3b2e','#faf5ea','#f0e7d4']},
+  {id:'cute',name:'甜屿茶饮',desc:'奶茶 · 甜品',swatches:['#e5568f','#fff7fb','#ffeef5']},
+  {id:'luxury',name:'臻选酒馆',desc:'酒馆 · 精致餐饮',swatches:['#c9a15a','#1e1a15','#131110']},
 ];
 BRAND_THEMES.unshift(
-  {id:'universal',name:'简约通用',desc:'大方留白，适合各类门店',swatches:['#293e38','#fffefa','#f4f3ee']},
-  {id:'western',name:'高端西餐',desc:'深色金边，优雅餐厅气质',swatches:['#c9a15a','#1e1a15','#131110']},
-  {id:'hotpot',name:'中式火锅',desc:'暖红米白，热闹清晰的菜单',swatches:['#a73324','#fff9ee','#f9eadb']}
+  {id:'universal',name:'邻里食堂',desc:'简餐 · 社区餐饮',swatches:['#293e38','#fffefa','#f4f3ee']},
+  {id:'western',name:'悦境西餐',desc:'西餐 · 牛排',swatches:['#c9a15a','#1e1a15','#131110']},
+  {id:'hotpot',name:'沸席火锅',desc:'火锅 · 烤肉',swatches:['#a73324','#fff9ee','#f9eadb']}
 );
-for(const theme of BRAND_THEMES)theme.types={universal:['通用'],western:['西餐咖啡'],hotpot:['中式餐饮'],minimal:['通用','西餐咖啡'],classic:['中式餐饮'],luxury:['西餐咖啡'],cute:['茶饮甜品'],vibrant:['中式餐饮','茶饮甜品'],fresh:['通用','茶饮甜品']}[theme.id];
+for(const theme of BRAND_THEMES)theme.types={universal:['简餐食堂'],western:['西餐酒馆'],hotpot:['火锅烤肉'],minimal:['咖啡烘焙'],classic:['中式餐饮'],luxury:['西餐酒馆'],cute:['茶饮甜品'],vibrant:['小吃快餐'],fresh:['日料轻食']}[theme.id];
+const BASE_BRAND_THEMES=[
+  {id:'fresh',name:'清新自然',desc:'竹韵绿意，清爽亲切'},
+  {id:'minimal',name:'极简黑白',desc:'简洁留白，突出内容'},
+  {id:'vibrant',name:'潮流暖橙',desc:'温暖明亮，年轻活力'},
+  {id:'classic',name:'中式典雅',desc:'深红米金，典雅沉稳'},
+  {id:'cute',name:'可爱粉嫩',desc:'柔和粉嫩，圆润亲切'},
+  {id:'luxury',name:'奢华黑金',desc:'深色金边，精致质感'}
+].map(t=>({...t,swatches:BRAND_THEMES.find(b=>b.id===t.id).swatches}));
+const baseThemeName=id=>BASE_BRAND_THEMES.find(t=>t.id===id)?.name||'模板默认配色';
 const themeName=id=>(BRAND_THEMES.find(t=>t.id===id)||BRAND_THEMES[0]).name;
 function applyBrand(brand){
   const theme=BRAND_THEMES.find(t=>t.id===((brand&&brand.theme)||'fresh'))||BRAND_THEMES[0];
