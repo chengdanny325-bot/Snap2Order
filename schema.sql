@@ -78,4 +78,14 @@ CREATE TABLE IF NOT EXISTS benefit_claims (
  store_id TEXT NOT NULL REFERENCES stores(id), customer_id TEXT NOT NULL REFERENCES users(id),
  kind TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(store_id,customer_id,kind,day)
 );
-PRAGMA user_version = 5;
+CREATE TABLE IF NOT EXISTS store_oc (
+ store_id TEXT PRIMARY KEY REFERENCES stores(id),
+ name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+ mime TEXT NOT NULL CHECK(mime IN ('image/jpeg','image/png')), image BLOB NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oc_purchases (
+ store_id TEXT NOT NULL REFERENCES stores(id), item_id TEXT NOT NULL,
+ buyer_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
+ PRIMARY KEY(store_id,item_id)
+);
+PRAGMA user_version = 6;

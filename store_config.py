@@ -4,7 +4,7 @@ import os
 import urllib.request
 from decimal import Decimal, InvalidOperation
 
-MODULES = ('ordering', 'membership', 'coupons', 'wheel')
+MODULES = ('ordering', 'membership', 'coupons', 'wheel', 'oc')
 THEMES = ('universal', 'western', 'hotpot', 'fresh', 'minimal', 'vibrant', 'classic', 'cute', 'luxury')
 
 def short(value, maximum):
@@ -20,6 +20,11 @@ def amount(value, maximum=999999):
         return int(n)
     except (ValueError, InvalidOperation):
         raise ValueError('金额须为非负数，最多两位小数')
+
+def points_count(value, label, maximum=100000):
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise ValueError(label+'须为 0～'+str(maximum)+' 的整数')
+    return value
 
 def normalize(raw):
     raw = raw or {}
@@ -42,9 +47,27 @@ def normalize(raw):
     threshold = amount(coupon.get('minimum', 30), 999999) / 100
     if modules.get('coupons') or modules.get('wheel'):
         if value <= 0 or threshold <= value: raise ValueError('优惠金额须大于零，使用门槛须高于优惠金额')
+    points = raw.get('points') or {}
+    if not isinstance(points, dict): raise ValueError('积分规则格式错误')
+    if any(key not in ('per_spend', 'earn', 'register_bonus', 'checkin', 'daka') for key in points): raise ValueError('积分规则格式错误')
+    per_spend = amount(points.get('per_spend', 1), 1000000) / 100
+    if modules.get('membership') and per_spend <= 0: raise ValueError('消费积分门槛须大于零')
+    points = {'per_spend': per_spend,
+              'earn': points_count(points.get('earn', 1), '消费积分'),
+              'register_bonus': points_count(points.get('register_bonus', 0), '注册赠送积分'),
+              'checkin': points_count(points.get('checkin', 1), '签到积分'),
+              'daka': points_count(points.get('daka', 2), '打卡积分')}
+    oc = raw.get('oc') or {}
+    if not isinstance(oc, dict): raise ValueError('OC 配置格式错误')
+    oc_image = oc.get('image_url') or None
+    if oc_image is not None and (not isinstance(oc_image, str) or not oc_image.startswith('/api/oc-images/')):
+        raise ValueError('请先生成 OC 形象')
+    oc = {'name': short(oc.get('name', ''), 30), 'description': short(oc.get('description', ''), 500), 'image_url': oc_image}
+    if modules.get('oc') and not oc['image_url']: raise ValueError('启用 OC 模块前请先生成 OC 形象')
+    if modules.get('oc') and not modules.get('membership'): raise ValueError('OC 装扮使用会员积分，请同时开启会员积分模块')
     return {'version': 1, 'profile': profile, 'banner_url': banner, 'layout': layout,
             'modules': {key: modules.get(key, key == 'ordering') for key in MODULES},
-            'coupon': {'amount': value, 'minimum': threshold}}
+            'coupon': {'amount': value, 'minimum': threshold}, 'points': points, 'oc': oc}
 
 def item_details(item):
     stock = item.get('stock')
@@ -101,6 +124,34 @@ def recommendation(description, images=None):
 
 def logo_configured():
     return bool((os.getenv('AI_LOGO_API_KEY') or os.getenv('STORE_AI_API_KEY')) and os.getenv('AI_LOGO_API_URL') and os.getenv('AI_LOGO_MODEL'))
+
+def generate_oc(name, description):
+    """Mascot image generation; shares the AI_LOGO_* image service configuration."""
+    import base64
+    import dish_media
+    import tls_support
+    if not logo_configured():
+        raise ValueError('OC 生成尚未配置，请设置 AI_LOGO_API_KEY、AI_LOGO_API_URL、AI_LOGO_MODEL（与 AI Logo 共用图像服务）。也可暂时关闭 OC 模块。')
+    name = short(name, 30)
+    description = short(description, 500)
+    if not description: raise ValueError('请先描述 OC 形象，例如：一只橘色小猫，圆圆的眼睛，性格活泼')
+    endpoint = os.getenv('AI_LOGO_API_URL', '')
+    if not endpoint.startswith('https://'): raise ValueError('图像生成服务地址须使用 HTTPS')
+    key = os.getenv('AI_LOGO_API_KEY') or os.getenv('STORE_AI_API_KEY')
+    payload = {'model': os.getenv('AI_LOGO_MODEL'), 'n': 1, 'size': '1024x1024',
+               'prompt': 'Full-body mascot character for a small restaurant, standing pose, centered, plain solid light background. Character: '+description+'. Name: '+name+'. Cute, friendly, clean vector-like rendering. Keep clear space above the head and around the neck so accessories can be added later. No text, no mockup scenes.'}
+    try:
+        request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+        with urllib.request.urlopen(request, timeout=120, context=tls_support.context()) as response:
+            body = response.read(20*1024*1024+1)
+        if len(body)>20*1024*1024: raise ValueError()
+        result = json.loads(body)
+        encoded = result['data'][0]['b64_json']
+        raw = base64.b64decode(encoded, validate=True)
+        mime = dish_media.raster_type(raw,'OC 形象',max_bytes=12*1024*1024)
+        return {'image':raw, 'mime':mime}
+    except Exception:
+        raise ValueError('OC 生成失败。请检查图像模型配置；接口需返回 PNG/JPEG 的 b64_json。原形象保留，可重试。') from None
 
 def generate_logo(name, theme, prompt):
     """Image-generations adapter. The browser compresses and uploads the returned raster."""
