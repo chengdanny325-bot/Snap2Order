@@ -277,3 +277,19 @@ class OCRSpaceAdapter(unittest.TestCase):
             call.assert_not_called()
 
 if __name__=='__main__':unittest.main(verbosity=2)
+
+
+class OriginConfigurationTests(unittest.TestCase):
+    def test_public_url_allows_local_same_origin_but_rejects_external(self):
+        handler = object.__new__(server.Handler)
+        with patch.object(server, 'PUBLIC_URL', 'https://snap2order.onrender.com'):
+            handler.headers = {'Host': 'localhost:8766', 'Origin': 'http://localhost:8766', 'Sec-Fetch-Site': 'same-origin'}
+            handler.check_origin()
+            handler.headers['Origin'] = 'https://untrusted.example'
+            with self.assertRaises(server.APIError):
+                handler.check_origin()
+            handler.headers = {'Host': 'snap2order.onrender.com', 'Origin': 'https://snap2order.onrender.com', 'Sec-Fetch-Site': 'same-origin'}
+            handler.check_origin()
+            handler.headers['Sec-Fetch-Site'] = 'cross-site'
+            with self.assertRaises(server.APIError):
+                handler.check_origin()

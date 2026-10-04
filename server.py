@@ -316,7 +316,12 @@ class Handler(BaseHTTPRequestHandler):
     def check_origin(self):
         origin = self.headers.get('Origin')
         allowed = PUBLIC_URL or ('http://' + self.headers.get('Host', ''))
-        if origin and origin != allowed:
+        local_origin = 'http://' + self.headers.get('Host', '')
+        local_host = urlsplit(local_origin).hostname
+        allowed_origins = {allowed}
+        if local_host in ('localhost', '127.0.0.1', '::1'):
+            allowed_origins.add(local_origin)
+        if origin and origin not in allowed_origins:
             raise APIError('请从本站页面提交操作', 403)
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
             raise APIError('不接受跨站请求', 403)
